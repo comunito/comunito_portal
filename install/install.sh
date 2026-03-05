@@ -25,7 +25,7 @@ if [ -d "$APP_DIR/.git" ]; then
   git pull --rebase
 else
   sudo rm -rf "$APP_DIR"
-  git clone . "$APP_DIR"
+  git clone https://github.com/comunito/comunito_portal.git "$APP_DIR"
 fi
 
 echo "==> 3) Crear venv e instalar requirements"
