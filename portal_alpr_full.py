@@ -169,6 +169,11 @@ CAM_DEF = {
     "alpr_topk": 3,
     "min_confidence": 0.90,
     "idle_clear_sec": 1.5,
+    "det_min_confidence": 0.80,
+    "stable_hits_required": 2,
+    "notfound_stable_hits_required": 4,
+    "suppress_notfound_after_auth_sec": 8,
+    "latch_hold_sec": 30.0,
 
     # Pre-procesado (solo ALPR, NO afecta snapshot/stream)
     "pp_enabled": False,
@@ -244,6 +249,11 @@ def load_cfg():
         c["alpr_topk"] = _clampi(c.get("alpr_topk",3),1,5,3)
         c["min_confidence"] = _clampf(c.get("min_confidence",0.90),0.0,1.0,0.90)
         c["idle_clear_sec"] = max(0.5, float(c.get("idle_clear_sec",1.5)))
+        c["det_min_confidence"] = _clampf(c.get("det_min_confidence",0.80),0.0,1.0,0.80)
+        c["stable_hits_required"] = _clampi(c.get("stable_hits_required",2),1,5,2)
+        c["notfound_stable_hits_required"] = _clampi(c.get("notfound_stable_hits_required",4),1,10,4)
+        c["suppress_notfound_after_auth_sec"] = _clampi(c.get("suppress_notfound_after_auth_sec",8),0,60,8)
+        c["latch_hold_sec"] = max(1.0, float(c.get("latch_hold_sec",30.0)))
 
         for sect in ("owners","visitors"):
             w = c.get(sect,{}) or {}
@@ -566,14 +576,19 @@ class VideoSource:
         while self.running:
             c=cfg["cameras"][self.cidx]
             url, ip, _ = materialize_url(c)
+
+            # Si sigue literal {CAM_IP}, no intentes abrir hasta resolver MAC->IP
+            if "{CAM_IP}" in (url or ""):
+                time.sleep(0.5)
+                continue
+
             if ip: self.last_ip=ip
             if self.last_ip and not _ping(self.last_ip,1):
                 time.sleep(0.5); continue
             cap=None
             try:
-                cap=self._open_gst(url)
-                if cap is None or not cap.isOpened():
-                    cap=self._open_cv(url)
+                print(f"[CAM{self.cidx+1}] opening via OpenCV/FFmpeg only")
+                cap=self._open_cv(url)
                 if not cap or not cap.isOpened():
                     time.sleep(0.6); continue
 
@@ -616,36 +631,94 @@ for g in grab: g.start()
 # ========== ALPR ==========
 try:
     from fast_alpr import ALPR
-    alpr = ALPR(detector_model="yolo-v9-t-384-license-plate-end2end",
-                ocr_model="cct-xs-v1-global-model")
-    ALPR_OK=True
+    print("[ALPR] import fast_alpr OK")
+    alpr = ALPR(
+        detector_model="yolo-v9-t-384-license-plate-end2end",
+        ocr_model="cct-xs-v1-global-model"
+    )
+    ALPR_OK = True
+    print("[ALPR] engine OK")
 except Exception as e:
     print("[ALPR] no disponible:", e)
-    alpr=None; ALPR_OK=False
+    alpr = None
+    ALPR_OK = False
 
 def run_alpr(image_bgr, resize_max_w, topk=3):
-    if not ALPR_OK or image_bgr is None: return []
-    H0,W0=image_bgr.shape[:2]
-    if W0<2 or H0<2: return []
-    target_w=max(64,int(resize_max_w))
-    if target_w<W0:
-        scale=max(1e-6,float(target_w)/float(W0))
+    if not ALPR_OK or image_bgr is None:
+        return []
+
+    H0, W0 = image_bgr.shape[:2]
+    if W0 < 2 or H0 < 2:
+        return []
+
+    def _best_conf(v):
+        if v is None:
+            return 0.0
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, (list, tuple)):
+            vals = []
+            for x in v:
+                try:
+                    vals.append(float(x))
+                except Exception:
+                    pass
+            return max(vals) if vals else 0.0
         try:
-            image_bgr=cv2.resize(image_bgr,(max(64,int(W0*scale)), max(36,int(H0*scale))), interpolation=cv2.INTER_AREA)
-        except: pass
+            return float(v)
+        except Exception:
+            return 0.0
+
+    img = image_bgr
+    target_w = max(64, int(resize_max_w))
+    if target_w < W0:
+        scale = max(1e-6, float(target_w) / float(W0))
+        try:
+            img = cv2.resize(
+                image_bgr,
+                (max(64, int(W0 * scale)), max(36, int(H0 * scale))),
+                interpolation=cv2.INTER_AREA
+            )
+        except Exception:
+            img = image_bgr
+
     try:
-        res=alpr.predict(image_bgr) or []
+        res = alpr.predict(img) or []
     except Exception as e:
-        print("[ALPR] predict error:", e); return []
-    out=[]
+        print("[ALPR] predict error:", e)
+        return []
+
+    out = []
     for r in res:
-        det=getattr(r,"detection",None); ocr=getattr(r,"ocr",None)
-        if det is None or ocr is None: continue
-        text=(getattr(ocr,"text","") or "").upper()
-        conf=float(getattr(ocr,"confidence",0.0) or 0.0)
-        if text: out.append((text,conf))
-    out.sort(key=lambda x:x[1], reverse=True)
-    return out[:max(1,topk)]
+        det = getattr(r, "detection", None)
+        ocr = getattr(r, "ocr", None)
+        if det is None or ocr is None:
+            continue
+
+        det_conf = _best_conf(getattr(det, "confidence", None))
+        if det_conf <= 0.0:
+            det_conf = _best_conf(getattr(det, "score", None))
+
+        raw_text = getattr(ocr, "text", "")
+        raw_conf = getattr(ocr, "confidence", 0.0)
+
+        if isinstance(raw_text, (list, tuple)):
+            conf_list = raw_conf if isinstance(raw_conf, (list, tuple)) else [raw_conf] * len(raw_text)
+            for t, c in zip(raw_text, conf_list):
+                tt = str(t or "").strip().upper()
+                cc = _best_conf(c)
+                if tt:
+                    out.append((tt, cc, det_conf))
+            continue
+
+        text = str(raw_text or "").strip().upper()
+        conf = _best_conf(raw_conf)
+        if text:
+            out.append((text, conf, det_conf))
+
+    out.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    return out[:max(1, topk)]
+
 
 
 # ========== Pre-procesado (solo ALPR) ==========
@@ -1448,75 +1521,145 @@ states=[{"plate":"", "conf":0.0, "ts":0.0, "display":["","",""], "titles":["Foli
 tag_states=[{"tag":"", "ts":0.0, "auth":False, "cat":"NONE", "user_type":"NONE", "fields":["","",""]},
             {"tag":"", "ts":0.0, "auth":False, "cat":"NONE", "user_type":"NONE", "fields":["","",""]}]
 slock=[threading.Lock(), threading.Lock()]
+_stable_state=[{"last":"","hits":0},{"last":"","hits":0}]
+_last_auth_ts=[0.0,0.0]
 
 def _alpr_loop(cam:int):
     k=0
     while True:
-        fr=grab[cam-1].get()
-        if fr is None: time.sleep(0.02); continue
-        cdict=cfg["cameras"][cam-1]
-        mot=motion[cam-1]
-        if cdict["motion"].get("enabled",True) and not mot.active:
-            time.sleep(0.20)
-            if mot.trigger.is_set(): mot.trigger.clear()
-            else: continue
-        if mot.trigger.is_set(): mot.trigger.clear(); k=0
-        k=(k+1)%cdict["process_every_n"]
-        if k!=0: time.sleep(0.01); continue
+        try:
+            fr=grab[cam-1].get()
+            if fr is None:
+                time.sleep(0.02)
+                continue
 
-        fr_roi=_apply_roi(cam, fr)
-        fr_alpr=_preprocess_for_alpr(cam, fr_roi)
-        results=run_alpr(fr_alpr, cdict["resize_max_w"], topk=cdict["alpr_topk"])
-        if not results:
-            time.sleep(0.01); continue
+            cdict=cfg["cameras"][cam-1]
+            mot=motion[cam-1]
 
-        text,conf=results[0]
-        if conf < float(cdict.get("min_confidence",0.9)):
-            time.sleep(0.01); continue
+            if cdict["motion"].get("enabled",True) and not mot.active:
+                time.sleep(0.20)
+                if mot.trigger.is_set():
+                    mot.trigger.clear()
+                else:
+                    continue
 
-        user_type, row = lookup_row(cam, text)
-        disp_vals=["","",""]; titles=["Folio","Nombre","Telefono"]
-        auth=False
+            if mot.trigger.is_set():
+                mot.trigger.clear()
+                k=0
 
-        if user_type=="PROPIETARIO":
-            sec=cdict["owners"]
-            auth=is_active_from_row(sec,row)
-            disp_vals=_extract_fields(row, sec.get("disp_cols"))
-            titles=sec.get("disp_titles",titles)
-            pair=sec["wh_active"] if auth else sec["wh_inactive"]
-            cat="ACTIVE" if auth else "INACTIVE"
-        elif user_type=="VISITA":
-            sec=cdict["visitors"]
-            auth=is_active_from_row(sec,row)
-            disp_vals=_extract_fields(row, sec.get("disp_cols"))
-            titles=sec.get("disp_titles",titles)
-            pair=sec["wh_active"] if auth else sec["wh_inactive"]
-            cat="ACTIVE" if auth else "INACTIVE"
-        else:
-            pair=cdict["wh_notfound"]
-            cat="NOTFOUND"
+            k=(k+1)%cdict["process_every_n"]
+            if k!=0:
+                time.sleep(0.01)
+                continue
 
-        # Gate auto
-        if auth and cdict.get("gate_enabled",False) and cdict.get("gate_auto_on_auth",False):
-            if gate_can_fire(cam): gate_fire(cam)
+            fr_roi=_apply_roi(cam, fr)
+            fr_alpr=_preprocess_for_alpr(cam, fr_roi)
 
-        # Webhooks
-        if user_type!="NONE":
-            enqueue_webhooks(cam, cat, pair, user_type, "Placa", text, disp_vals, titles)
-        else:
-            enqueue_webhooks(cam, "NOTFOUND", pair, "NoFound", "Placa", text, ["","",""], ["Folio","Nombre","Telefono"])
+            try:
+                results=run_alpr(fr_alpr, cdict["resize_max_w"], topk=cdict["alpr_topk"])
+            except Exception as e:
+                print(f"[ALPR][cam{cam}] run_alpr fatal:", e)
+                time.sleep(0.2)
+                continue
 
-        with slock[cam-1]:
-            states[cam-1]["plate"]=text
-            states[cam-1]["conf"]=float(conf)
-            states[cam-1]["ts"]=time.time()
-            states[cam-1]["auth"]=bool(auth)
-            states[cam-1]["cat"]=cat
-            states[cam-1]["display"]=disp_vals
-            states[cam-1]["titles"]=titles
-            states[cam-1]["user_type"]=user_type
+            if not results:
+                _stable_state[cam-1]["last"]=""
+                _stable_state[cam-1]["hits"]=0
+                time.sleep(0.01)
+                continue
 
-        time.sleep(0.005)
+            text, conf, det_conf = results[0]
+
+            if det_conf < float(cdict.get("det_min_confidence",0.80)):
+                _stable_state[cam-1]["last"]=""
+                _stable_state[cam-1]["hits"]=0
+                time.sleep(0.01)
+                continue
+
+            if conf < float(cdict.get("min_confidence",0.9)):
+                _stable_state[cam-1]["last"]=""
+                _stable_state[cam-1]["hits"]=0
+                time.sleep(0.01)
+                continue
+
+            key = canon_plate(text)
+            if key == _stable_state[cam-1]["last"]:
+                _stable_state[cam-1]["hits"] += 1
+            else:
+                _stable_state[cam-1]["last"] = key
+                _stable_state[cam-1]["hits"] = 1
+
+            needed = int(cdict.get("stable_hits_required",2))
+            if _stable_state[cam-1]["hits"] < needed:
+                time.sleep(0.01)
+                continue
+
+            user_type, row = lookup_row(cam, text)
+            disp_vals=["","",""]
+            titles=["Folio","Nombre","Telefono"]
+            auth=False
+
+            needed = int(cdict.get("stable_hits_required",2))
+            if user_type == "NONE":
+                needed = int(cdict.get("notfound_stable_hits_required",4))
+
+            if _stable_state[cam-1]["hits"] < needed:
+                time.sleep(0.01)
+                continue
+
+            # suprimir NoFound por unos segundos después de lectura válida
+            if user_type == "NONE":
+                sup = int(cdict.get("suppress_notfound_after_auth_sec",8))
+                if sup > 0 and (time.time() - _last_auth_ts[cam-1]) < sup:
+                    time.sleep(0.01)
+                    continue
+
+            if user_type=="PROPIETARIO":
+                _last_auth_ts[cam-1] = time.time()
+                sec=cdict["owners"]
+                auth=is_active_from_row(sec,row)
+                disp_vals=_extract_fields(row, sec.get("disp_cols"))
+                titles=sec.get("disp_titles",titles)
+                pair=sec["wh_active"] if auth else sec["wh_inactive"]
+                cat="ACTIVE" if auth else "INACTIVE"
+            elif user_type=="VISITA":
+                _last_auth_ts[cam-1] = time.time()
+                sec=cdict["visitors"]
+                auth=is_active_from_row(sec,row)
+                disp_vals=_extract_fields(row, sec.get("disp_cols"))
+                titles=sec.get("disp_titles",titles)
+                pair=sec["wh_active"] if auth else sec["wh_inactive"]
+                cat="ACTIVE" if auth else "INACTIVE"
+            else:
+                pair=cdict["wh_notfound"]
+                cat="NOTFOUND"
+
+            if auth and cdict.get("gate_enabled",False) and cdict.get("gate_auto_on_auth",False):
+                if gate_can_fire(cam):
+                    gate_fire(cam)
+
+            if user_type!="NONE":
+                enqueue_webhooks(cam, cat, pair, user_type, "Placa", text, disp_vals, titles)
+            else:
+                enqueue_webhooks(cam, "NOTFOUND", pair, "NoFound", "Placa", text, ["","",""], ["Folio","Nombre","Telefono"])
+
+            with slock[cam-1]:
+                states[cam-1]["plate"]=text
+                states[cam-1]["conf"]=float(conf)
+                states[cam-1]["ts"]=time.time()
+                states[cam-1]["auth"]=bool(auth)
+                states[cam-1]["cat"]=cat
+                states[cam-1]["display"]=disp_vals
+                states[cam-1]["titles"]=titles
+                states[cam-1]["user_type"]=user_type
+
+            time.sleep(0.005)
+
+        except Exception as e:
+            print(f"[ALPR][cam{cam}] loop exception:", e)
+            time.sleep(0.2)
+
+
 
 # ========== Seguridad ==========
 def _check_token():
@@ -1634,11 +1777,7 @@ async function poll(){
   for(let cam=1; cam<=2; cam++){
     try{
       const s=await (await fetch('/api/status?cam='+cam)).json();
-      const now=Date.now()/1000.0;
-      const idle=(s.idle||1.5);
-
-      const idlePlate=(!s.ts?999:(now-s.ts));
-      if(!s.plate || idlePlate>idle){
+      if(!s.plate){
         document.getElementById('p'+cam).textContent='Sin Placa';
         document.getElementById('cf'+cam).textContent='—';
         document.getElementById('ts'+cam).textContent='—';
@@ -1647,8 +1786,8 @@ async function poll(){
         document.getElementById('f'+cam).textContent='';
       }else{
         document.getElementById('p'+cam).textContent=s.plate;
-        document.getElementById('cf'+cam).textContent=(s.conf*100).toFixed(1);
-        document.getElementById('ts'+cam).textContent=new Date(s.ts*1000).toLocaleTimeString();
+        document.getElementById('cf'+cam).textContent=(Number(s.conf||0)*100).toFixed(1);
+        document.getElementById('ts'+cam).textContent=s.ts ? new Date(s.ts*1000).toLocaleTimeString() : '—';
         document.getElementById('usr'+cam).textContent=s.user_type||'—';
         const wl=document.getElementById('wl'+cam);
         wl.textContent=(s.category==='ACTIVE')?'EN WHITELIST (ACTIVO)':(s.category==='INACTIVE'?'EN WHITELIST (INACTIVO)':'NOFOUND');
@@ -1656,8 +1795,7 @@ async function poll(){
         document.getElementById('f'+cam).textContent=(s.fields||[]).filter(Boolean).join(' • ');
       }
 
-      const idleTag=(!s.tag_ts?999:(now-s.tag_ts));
-      if(!s.tag || idleTag>idle){
+      if(!s.tag){
         document.getElementById('t'+cam).textContent='—';
         const twl=document.getElementById('twl'+cam); twl.textContent='—'; twl.className='';
         document.getElementById('tf'+cam).textContent='';
@@ -1680,7 +1818,7 @@ async function openGate(cam){
   }catch(e){m.textContent='Error: '+e;} finally{setTimeout(()=>m.textContent='',1500);}
 }
 
-setInterval(poll,800);
+setInterval(poll,2500);
 poll();
 </script>
 """
@@ -2193,6 +2331,7 @@ SETTINGS_CAM = """
 
   <p style="margin-top:12px">
     <button class="btn" type="submit" name="action" value="save">Guardar</button>
+    <button class="btn" type="submit" name="action" value="copy_to_other">Copiar esta configuración a Cam {{2 if cam==1 else 1}}</button>
     <a class="btn" href="/">Volver</a>
   </p>
 </form>
@@ -2250,6 +2389,30 @@ def settings_index():
         hb_last_code=(hb_status.get("last_code", None) if hb_status.get("last_code",None) is not None else "—"),
         hb_last_err=(hb_status.get("last_err","") or "—"),
     )
+
+
+def _copy_cam_settings(src_cam:int, dst_cam:int):
+    src_cfg = deepcopy(cfg["cameras"][src_cam-1])
+    dst_cfg = deepcopy(cfg["cameras"][dst_cam-1])
+
+    # conservar valores que suelen ser propios de cada cámara
+    preserve_keys = {
+        "camera_mac",
+        "camera_url",
+        "gate_url",
+        "gate_pin",
+        "gate_serial_gate",
+        "gate_serial_device",
+    }
+
+    merged = deepcopy(src_cfg)
+    for k in preserve_keys:
+        if k in dst_cfg:
+            merged[k] = deepcopy(dst_cfg[k])
+
+    cfg["cameras"][dst_cam-1] = merged
+    save_cfg(cfg)
+    return f"Configuración general de Cam {src_cam} copiada a Cam {dst_cam}"
 
 def _pull_pair_from_form(prefix:str):
     return {
@@ -2371,8 +2534,11 @@ def settings_cam(cam:int):
         # Save config first
         save_cfg(cfg)
 
-        # Actions refresh
-        if action=="refresh_owners":
+        # Actions
+        if action=="copy_to_other":
+            other = 2 if cam==1 else 1
+            owners_refresh_msg = _copy_cam_settings(cam, other)
+        elif action=="refresh_owners":
             owners_refresh_msg = download_wl(cam,"owners")
         elif action=="refresh_visitors":
             visitors_refresh_msg = download_wl(cam,"visitors")
@@ -2716,14 +2882,31 @@ def api_status():
     with slock[cam-1]:
         st=states[cam-1].copy()
         tgs=tag_states[cam-1].copy()
-    now=time.time(); idle=cdict.get("idle_clear_sec",1.5)
-    if (not st["plate"]) or ((now-(st["ts"] or 0))>idle):
+
+    now=time.time()
+    idle=float(cdict.get("idle_clear_sec",1.5))
+    hold=float(cdict.get("latch_hold_sec",30.0))
+
+    if (not st["plate"]) or ((now-(st["ts"] or 0))>hold):
         st["plate"]=""; st["conf"]=0.0; st["auth"]=False; st["display"]=["","",""]; st["user_type"]="NONE"; st["cat"]="NONE"
-    if (not tgs["tag"]) or ((now-(tgs["ts"] or 0))>idle):
+    if (not tgs["tag"]) or ((now-(tgs["ts"] or 0))>hold):
         tgs["tag"]=""; tgs["auth"]=False; tgs["cat"]="NONE"; tgs["user_type"]="NONE"; tgs["fields"]=["","",""]
-    return jsonify({"cam":cam,"plate":st["plate"],"conf":st["conf"],"ts":st["ts"],
-                    "category":st["cat"],"user_type":st["user_type"],"fields":st["display"],"idle":idle,
-                    "tag":tgs["tag"], "tag_ts":tgs["ts"], "tag_cat":tgs["cat"], "tag_fields":tgs["fields"]})
+
+    return jsonify({
+        "cam":cam,
+        "plate":st["plate"],
+        "conf":st["conf"],
+        "ts":st["ts"],
+        "category":st["cat"],
+        "user_type":st["user_type"],
+        "fields":st["display"],
+        "idle":idle,
+        "hold":hold,
+        "tag":tgs["tag"],
+        "tag_ts":tgs["ts"],
+        "tag_cat":tgs["cat"],
+        "tag_fields":tgs["fields"]
+    })
 
 @app.route("/api/gate_open", methods=["POST"])
 def api_gate_open():
@@ -2802,6 +2985,60 @@ def api_tag_event():
 
     return jsonify({"ok":True,"active":bool(auth),"category":cat,"user_type":user_type})
 
+
+@app.route("/api/alpr_debug")
+def api_alpr_debug():
+    cam=1
+    try:
+        cam=int(request.args.get("cam","1"))
+    except:
+        cam=1
+    cam=1 if cam==1 else 2
+
+    fr=grab[cam-1].get()
+    if fr is None:
+        return jsonify({"ok":False,"error":"no-frame","cam":cam}), 503
+
+    try:
+        fr_roi=_apply_roi(cam, fr)
+    except Exception as e:
+        return jsonify({"ok":False,"error":f"roi-error: {e}","cam":cam}), 500
+
+    try:
+        fr_alpr=_preprocess_for_alpr(cam, fr_roi)
+    except Exception as e:
+        return jsonify({"ok":False,"error":f"preprocess-error: {e}","cam":cam}), 500
+
+    try:
+        results=run_alpr(fr_alpr, cfg["cameras"][cam-1]["resize_max_w"], topk=cfg["cameras"][cam-1]["alpr_topk"])
+    except Exception as e:
+        return jsonify({"ok":False,"error":f"run_alpr-error: {e}","cam":cam}), 500
+
+    out=[]
+    for t,c in results:
+        try:
+            out.append({"text":str(t), "conf":float(c)})
+        except Exception:
+            out.append({"text":str(t), "conf":0.0})
+
+    return jsonify({
+        "ok":True,
+        "cam":cam,
+        "frame_shape": (list(fr.shape) if fr is not None else None),
+        "roi_shape": (list(fr_roi.shape) if fr_roi is not None else None),
+        "alpr_shape": (list(fr_alpr.shape) if fr_alpr is not None else None),
+        "count": len(out),
+        "results": out,
+        "cfg": {
+            "camera_mode": cfg["cameras"][cam-1].get("camera_mode"),
+            "resize_max_w": cfg["cameras"][cam-1].get("resize_max_w"),
+            "min_confidence": cfg["cameras"][cam-1].get("min_confidence"),
+            "roi_enabled": cfg["cameras"][cam-1].get("roi",{}).get("enabled"),
+            "motion_enabled": cfg["cameras"][cam-1].get("motion",{}).get("enabled"),
+            "pp_enabled": cfg["cameras"][cam-1].get("pp_enabled"),
+        }
+    })
+
 @app.route("/healthz")
 def healthz():
     ok1=grab[0].get() is not None
@@ -2822,6 +3059,6 @@ if __name__=="__main__":
     os.environ["OPENBLAS_NUM_THREADS"]="1"
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=5000, threads=4)
+        serve(app, host="0.0.0.0", port=5000, threads=8)
     except Exception:
         app.run(host="0.0.0.0", port=5000, threaded=True)

@@ -32,8 +32,24 @@ echo "==> 3) Crear venv e instalar requirements"
 python3 -m venv "$VENV"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
-python -m pip install --upgrade pip wheel
+python -m pip install --upgrade pip wheel setuptools
 pip install -r "$APP_DIR/requirements.txt"
+
+echo "==> 3.1) Validar fast_alpr"
+python - <<'PYCHK'
+import sys
+try:
+    from fast_alpr import ALPR
+    print("[OK] import fast_alpr")
+    alpr = ALPR(
+        detector_model="yolo-v9-t-384-license-plate-end2end",
+        ocr_model="cct-xs-v1-global-model"
+    )
+    print("[OK] ALPR engine listo")
+except Exception as e:
+    print("[ERROR] fast_alpr no quedó operativo:", e)
+    sys.exit(1)
+PYCHK
 
 echo "==> 4) Instalar systemd service"
 sudo cp "$APP_DIR/systemd/comunito-portal.service" "$SVC"
