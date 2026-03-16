@@ -15,7 +15,8 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   libglib2.0-0 libxext6 libsm6 libxrender1 libgl1 \
   build-essential curl ca-certificates git unzip \
   network-manager tzdata iproute2 net-tools \
-  gstreamer1.0-tools gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+  gstreamer1.0-tools gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  dnsmasq
 
 sudo systemctl enable NetworkManager --now || true
 
@@ -51,17 +52,41 @@ except Exception as e:
     sys.exit(1)
 PYCHK
 
-echo "==> 4) Instalar systemd service"
+echo "==> 4) Configurar LAN de cámaras en eth0"
+sudo nmcli connection delete comunito-cam-lan 2>/dev/null || true
+sudo nmcli connection add \
+  type ethernet \
+  ifname eth0 \
+  con-name comunito-cam-lan \
+  ipv4.method manual \
+  ipv4.addresses 192.168.88.1/24 \
+  ipv6.method ignore \
+  autoconnect yes || true
+sudo nmcli connection up comunito-cam-lan || true
+
+echo "==> 5) Configurar DHCP para cámaras"
+sudo mkdir -p /etc/dnsmasq.d
+sudo cp "$APP_DIR/install/network/cam_eth.conf" /etc/dnsmasq.d/cam_eth.conf
+sudo systemctl enable dnsmasq
+sudo systemctl restart dnsmasq
+
+echo "==> 6) Instalar Tailscale"
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo systemctl enable tailscaled --now || true
+echo "==> Tailscale instalado. Después ejecuta: sudo tailscale up"
+
+echo "==> 7) Instalar systemd service"
 sudo cp "$APP_DIR/systemd/comunito-portal.service" "$SVC"
 sudo sed -i "s|^User=.*|User=$ME|g" "$SVC"
 sudo sed -i "s|/home/pi|/home/$ME|g" "$SVC"
 
-echo "==> 5) Habilitar servicio"
+echo "==> 8) Habilitar servicio"
 sudo systemctl daemon-reload
 sudo systemctl enable comunito-portal.service --now
 
 IP_NOW="$(hostname -I | awk '{print $1}')"
 echo
 echo "==> Listo:"
-echo "    http://$IP_NOW"
-echo "    Settings: http://$IP_NOW/settings"
+echo "    Portal:   http://$IP_NOW:5000"
+echo "    Settings: http://$IP_NOW:5000/settings"
+echo "    Tailscale: ejecuta sudo tailscale up"
