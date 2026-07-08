@@ -1037,18 +1037,25 @@ class SendManager:
         url=(url or "").strip()
         if not url: return False, "no-url"
         try:
+            # allow_redirects=False: Google Apps Script devuelve 302 antes de ejecutar.
+            # El POST se procesa ANTES del redirect, por eso NO seguimos el redirect
+            # (si lo seguimos, el body se pierde y el script no recibe datos).
+            # Aceptamos 200, 201, 202 y 302 como éxito.
             if snap_bytes is not None:
                 if (mode or "multipart").lower()=="json":
                     js=dict(payload)
                     js["snapshot_b64"]=base64.b64encode(snap_bytes).decode("ascii")
-                    r=sess.post(url, json=js, timeout=8)
+                    r=sess.post(url, json=js, timeout=15, allow_redirects=False)
                 else:
                     files={"snapshot": ("snapshot.jpg", snap_bytes, "image/jpeg")}
-                    r=sess.post(url, data=payload, files=files, timeout=8)
+                    r=sess.post(url, data=payload, files=files, timeout=15, allow_redirects=False)
             else:
-                r=sess.post(url, json=payload, timeout=8)
-            return (r.status_code==200), f"HTTP {r.status_code}"
+                r=sess.post(url, json=payload, timeout=15, allow_redirects=False)
+            ok = r.status_code in (200, 201, 202, 302)
+            print(f"[WH][cam{self.cam}] POST {url[:80]} → HTTP {r.status_code} {'OK' if ok else 'FAIL'}")
+            return ok, f"HTTP {r.status_code}"
         except Exception as e:
+            print(f"[WH][cam{self.cam}] ERROR POST {url[:80]} → {e}")
             return False, str(e)
 
     def _loop(self):
@@ -1122,12 +1129,16 @@ def _endpoints_pair(pair:dict):
 def enqueue_webhooks(cam:int, cat:str, pair:dict, usuario:str, dispositivo:str, valor:str, disp_vals:list[str], titles:list[str]):
     endpoints=_endpoints_pair(pair or {})
     if not any((u or "").strip() for (u,_,_) in endpoints):
+        print(f"[WH][cam{cam}][{cat}] Sin URLs configuradas — no se envía")
         return False, "Sin webhooks"
     with _send_lock[cam-1]:
         if not _should_send(cam, cat, valor):
+            print(f"[WH][cam{cam}][{cat}] Dedup/gap — ignorando '{valor}'")
             return False, "Dedup/gap"
         _mark_sent(cam, cat, valor)
     payload=_base_payload(cam, usuario, dispositivo, valor, disp_vals, titles)
+    urls=[u for u,_,_ in endpoints if (u or "").strip()]
+    print(f"[WH][cam{cam}][{cat}] Encolando '{valor}' → {urls}")
     send_mgr[cam-1].put({"payload": dict(payload), "endpoints": endpoints})
     return True, "Encolado"
 
