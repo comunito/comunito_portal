@@ -39,10 +39,13 @@ function todayParts_() {
 }
 
 function driveLinksFor_(file) {
+  if (!file) return {viewLink:'', contentLink:''};
+  if (file._err) return {viewLink:'ERROR: ' + file._err.slice(0,80), contentLink:''};
   const id = file.getId();
-  const viewLink = file.getUrl();
-  const contentLink = 'https://drive.google.com/uc?export=download&id=' + id;
-  return {viewLink, contentLink};
+  return {
+    viewLink: file.getUrl(),
+    contentLink: 'https://drive.google.com/uc?export=download&id=' + id
+  };
 }
 
 function insertAtRow2_(sh, rowArray) {
@@ -162,21 +165,17 @@ function doPost(e) {
 
       obj = JSON.parse(e.postData.contents || '{}');
 
-      // *** FIX CRÍTICO: Drive en try-catch AISLADO ***
-      // Si DriveApp falla (permisos, carpeta inaccesible, cuota),
-      // file queda null y la fila SE REGISTRA IGUAL sin imagen.
+      // FIX: Drive en try-catch AISLADO — si falla, fila se registra igual
       if (obj.snapshot_b64) {
         try {
           const bytes = Utilities.base64Decode(obj.snapshot_b64);
           const blob = Utilities.newBlob(bytes, 'image/jpeg', 'snap_' + Date.now() + '.jpg');
           const folder = DriveApp.getFolderById(FOLDER_ID);
           file = folder.createFile(blob);
-          // Descomentar para compartir públicamente:
-          // file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+          file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
         } catch (driveErr) {
-          // Error de Drive no interrumpe el registro de la fila
-          console.error('Drive snapshot error: ' + String(driveErr));
-          file = null;
+          console.error('Drive error: ' + String(driveErr));
+          file = { _err: String(driveErr) }; // marcador de error
         }
       }
 
@@ -236,8 +235,24 @@ function doPost(e) {
 }
 
 function testAuth() {
-  // Ejecutar manualmente UNA VEZ para autorizar permisos de Drive y Sheets
   DriveApp.getRootFolder();
   SpreadsheetApp.getActive().getSheets();
   Logger.log('Auth OK - permisos de Drive y Sheets autorizados');
+}
+
+function testDriveFolder() {
+  // Ejecutar para diagnosticar acceso a la carpeta de snapshots
+  try {
+    const folder = DriveApp.getFolderById(FOLDER_ID);
+    Logger.log('✅ Folder accesible: ' + folder.getName());
+    const blob = Utilities.newBlob('test', 'text/plain', 'test_acceso.txt');
+    const file = folder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    Logger.log('✅ Archivo creado: ' + file.getUrl());
+    file.setTrashed(true);
+    Logger.log('✅ Drive OK — snapshots funcionarán correctamente');
+  } catch(e) {
+    Logger.log('❌ ERROR Drive: ' + String(e));
+    Logger.log('→ Verifica que la carpeta ' + FOLDER_ID + ' esté compartida con la cuenta que ejecuta el script');
+  }
 }
