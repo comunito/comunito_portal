@@ -592,10 +592,20 @@ class VideoSource:
                 if not cap or not cap.isOpened():
                     time.sleep(0.6); continue
 
-                last=time.time()
+                # Limite de tiempo sin frames nuevos: 15s → reconectar
+                CAM_READ_TIMEOUT = 15.0
+                last_frame_ts = time.time()
+                last_url_check = time.time()
+
                 while self.running:
                     ok, fr = cap.read()
-                    if not ok or fr is None: break
+                    now = time.time()
+
+                    if not ok or fr is None:
+                        # cap.read() devolvió error — salir e intentar reconectar
+                        break
+
+                    last_frame_ts = now
 
                     try:
                         mx=int(cfg["cameras"][self.cidx].get("resize_max_w",1280))
@@ -609,16 +619,24 @@ class VideoSource:
 
                     with self.lock:
                         self.frame=fr
-                        self.ts=time.time()
+                        self.ts=now
 
-                    if (time.time()-last)>2.0:
-                        last=time.time()
+                    # Verificar cambio de IP cada 2s
+                    if (now - last_url_check) > 2.0:
+                        last_url_check = now
                         url2, ip2, _ = materialize_url(c)
                         if ip2 and self.last_ip and ip2!=self.last_ip:
+                            print(f"[CAM{self.cidx+1}] IP cambió, reconectando")
                             break
+
+                    # Anti-freeze: si no recibimos frame en CAM_READ_TIMEOUT, reconectar
+                    if (now - last_frame_ts) > CAM_READ_TIMEOUT:
+                        print(f"[CAM{self.cidx+1}] TIMEOUT sin frames ({CAM_READ_TIMEOUT}s), reconectando")
+                        break
+
                     time.sleep(0.001)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[CAM{self.cidx+1}] excepción en loop: {e}")
             finally:
                 try:
                     if cap: cap.release()
@@ -1317,20 +1335,56 @@ def _read_temp_c():
     except: pass
     return None
 
+# Timestamp actualizado por _sysmon_loop — usado por el watchdog interno
+_sysmon_last_alive = time.time()
+
+def _sd_notify(msg: str):
+    """Envía notificación al systemd watchdog si WATCHDOG_USEC está definido."""
+    try:
+        sock_path = os.environ.get("NOTIFY_SOCKET", "")
+        if not sock_path: return
+        import socket as _sock
+        with _sock.socket(_sock.AF_UNIX, _sock.SOCK_DGRAM) as s:
+            s.connect(sock_path)
+            s.sendall(msg.encode())
+    except Exception:
+        pass
+
 def _sysmon_loop():
-    global _cpu_prev
+    global _cpu_prev, _sysmon_last_alive
     t=_read_cpu_times()
     if t: _cpu_prev=t
     while True:
-        t2=_read_cpu_times(); cpu_pct=0.0
-        if t2 and _cpu_prev:
-            idle0,tot0=_cpu_prev; idle1,tot1=t2
-            di=idle1-idle0; dt=tot1-tot0
-            if dt>0: cpu_pct=max(0.0, min(100.0, (1.0 - (di/float(dt)))*100.0))
-            _cpu_prev=t2
-        sys_status["cpu_pct"]=round(cpu_pct,1)
-        sys_status["temp_c"]=_read_temp_c()
+        try:
+            t2=_read_cpu_times(); cpu_pct=0.0
+            if t2 and _cpu_prev:
+                idle0,tot0=_cpu_prev; idle1,tot1=t2
+                di=idle1-idle0; dt=tot1-tot0
+                if dt>0: cpu_pct=max(0.0, min(100.0, (1.0 - (di/float(dt)))*100.0))
+                _cpu_prev=t2
+            sys_status["cpu_pct"]=round(cpu_pct,1)
+            sys_status["temp_c"]=_read_temp_c()
+            _sysmon_last_alive = time.time()
+            # Ping al watchdog de systemd
+            _sd_notify("WATCHDOG=1")
+        except Exception:
+            pass
         time.sleep(1.0)
+
+def _internal_watchdog_loop():
+    """Si _sysmon_loop deja de actualizar por más de 90s, forzamos reinicio del proceso.
+    Esto atrapa deadlocks del GIL o freeze del event loop principal."""
+    WATCHDOG_TIMEOUT = 90.0
+    time.sleep(30.0)  # gracia inicial al arrancar
+    while True:
+        time.sleep(10.0)
+        try:
+            elapsed = time.time() - _sysmon_last_alive
+            if elapsed > WATCHDOG_TIMEOUT:
+                print(f"[WATCHDOG] sysmon sin respuesta {elapsed:.0f}s — forzando reinicio", flush=True)
+                os.kill(os.getpid(), 9)
+        except Exception:
+            pass
 
 
 # ========== Heartbeat (monitor) ==========
@@ -3075,12 +3129,14 @@ def healthz():
     return (f"CAM1:{'OK' if ok1 else 'NO'} CAM2:{'OK' if ok2 else 'NO'}", (200 if (ok1 or ok2) else 503))
 
 # ----- Threads -----
-for i in (1,2):
-    threading.Thread(target=_alpr_loop, args=(i,), daemon=True).start()
-    threading.Thread(target=_motion_loop, args=(i,), daemon=True).start()
+threading.Thread(target=_alpr_loop, args=(1,), daemon=True).start()
+threading.Thread(target=_alpr_loop, args=(2,), daemon=True).start()
+threading.Thread(target=_motion_loop, args=(1,), daemon=True).start()
+threading.Thread(target=_motion_loop, args=(2,), daemon=True).start()
 threading.Thread(target=_auto_refresh_loop, daemon=True).start()
 threading.Thread(target=_sysmon_loop, daemon=True).start()
 threading.Thread(target=_heartbeat_scheduler_loop, daemon=True).start()
+threading.Thread(target=_internal_watchdog_loop, daemon=True).start()
 
 if __name__=="__main__":
     os.environ["TZ"]="America/Mexico_City"
