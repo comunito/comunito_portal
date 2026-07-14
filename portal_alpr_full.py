@@ -386,8 +386,7 @@ def _load_cfg_with_fallback():
             pass
     return {}
 
-
-
+cfg = load_cfg()
 
 # ========== Gate Serial Manager ==========
 class GateSerialManager:
