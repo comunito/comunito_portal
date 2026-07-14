@@ -1,7 +1,7 @@
 [Unit]
 Description=Comunito Portal
-After=network-online.target
-Wants=network-online.target
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
 StartLimitIntervalSec=0
 TimeoutStartSec=0
 
@@ -12,17 +12,19 @@ ExecStart=/home/pi/comunito_portal/comunito-venv/bin/python -u portal_alpr_full.
 Restart=always
 RestartSec=5
 
-# Watchdog: si el proceso no pinga en 120s, systemd lo mata y lo reinicia
+# Watchdog: systemd mata y reinicia si el proceso no pinga en 120s
 WatchdogSec=120
 NotifyAccess=all
 
-# Limitar RAM para evitar OOM freeze del sistema
+# Limitar RAM — OOM killer elimina ESTE proceso antes de congelar el sistema
 MemoryMax=700M
 MemorySwapMax=0
-
-# OOMPolicy: kill este proceso en vez de congelar el kernel
 OOMPolicy=kill
 OOMScoreAdjust=500
+
+# TimeoutStartSec=120 permite que ALPR model loading tome hasta 2min
+# Si tarda más, systemd mata y reinicia (ALPR retry loop lo recupera)
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target

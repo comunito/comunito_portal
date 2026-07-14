@@ -9,14 +9,19 @@ from zoneinfo import ZoneInfo
 import socket
 from urllib.parse import urlparse
 import ipaddress
+import smtplib
+from email.mime.text import MIMEText
 
 try:
     import serial
 except Exception:
     serial = None
 
+# Limitar threads de OpenCV a nivel global (evita saturación en Pi)
+cv2.setNumThreads(2)
+
 # =========================
-#  Comunito Portal FULL v6.7.6
+#  Comunito Portal FULL v6.8.0
 #  - SIN bitácora (eliminada)
 #  - Webhooks: 2 por estado (Activo/Inactivo/NoFound) para Placas (owners+visitors)
 #  - Tags: solo owners (activo/inactivo) + NoFound (2 webhooks)
@@ -218,7 +223,14 @@ DEFAULTS = {
     "api_token": "",
     "monitor_enabled": False,
     "monitor_url": "",
-    "monitor_period_min": 0
+    "monitor_period_min": 0,
+    # Alertas por correo
+    "alert_email_enabled": False,
+    "alert_email_to": "",
+    "alert_smtp_user": "",
+    "alert_smtp_pass": "",
+    "alert_smtp_host": "smtp.gmail.com",
+    "alert_smtp_port": 587,
 }
 
 def load_cfg():
@@ -333,11 +345,49 @@ def load_cfg():
     d["monitor_period_min"] = _clampi(d.get("monitor_period_min",0),0,1440,0)
     return d
 
+# Ruta de backup en la partición FAT32 /boot — sobrevive a reinstalaciones de SO
+_BOOT_BACKUP = "/boot/firmware/comunito_config_backup.json"
+
 def save_cfg(c):
     with open(CFG_FILE,"w") as f:
         json.dump(c, f, indent=2)
+    # Backup automático en /boot (FAT32) para reinstalación sin pérdida de config
+    try:
+        with open(_BOOT_BACKUP, "w") as f:
+            json.dump(c, f, indent=2)
+    except Exception:
+        pass  # /boot puede ser read-only en algunos setups
 
-cfg = load_cfg()
+def _load_cfg_with_fallback():
+    """Carga config principal; si falla, intenta el backup en /boot."""
+    if os.path.exists(CFG_FILE):
+        try:
+            with open(CFG_FILE,"r") as f:
+                d = json.load(f)
+            if isinstance(d, dict) and d:
+                return d
+        except Exception:
+            pass
+    # Fallback: backup en /boot
+    if os.path.exists(_BOOT_BACKUP):
+        try:
+            with open(_BOOT_BACKUP,"r") as f:
+                d = json.load(f)
+            if isinstance(d, dict) and d:
+                print("[CFG] config principal ausente/corrupta — restaurada desde backup /boot")
+                # Restaurar también la copia principal
+                try:
+                    with open(CFG_FILE,"w") as f:
+                        json.dump(d, f, indent=2)
+                except Exception:
+                    pass
+                return d
+        except Exception:
+            pass
+    return {}
+
+
+
 
 # ========== Gate Serial Manager ==========
 class GateSerialManager:
@@ -551,7 +601,13 @@ class VideoSource:
         with self.lock:
             return self.frame
 
-    def _open_cv(self, url): return cv2.VideoCapture(url)
+    def _open_cv(self, url):
+        cap = cv2.VideoCapture()
+        # Timeout TCP real: si la cámara no responde en 5s, open() retorna sin bloquear
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+        cap.open(url)
+        return cap
 
     def _open_gst(self, url):
         if not url.lower().startswith("rtsp://"): return None
@@ -647,19 +703,54 @@ grab=[VideoSource(0), VideoSource(1)]
 for g in grab: g.start()
 
 # ========== ALPR ==========
+# ---- ALPR init con retry en background ----
+_alpr_lock = threading.Lock()
+
 try:
-    from fast_alpr import ALPR
-    print("[ALPR] import fast_alpr OK")
-    alpr = ALPR(
-        detector_model="yolo-v9-t-384-license-plate-end2end",
-        ocr_model="cct-xs-v1-global-model"
-    )
-    ALPR_OK = True
-    print("[ALPR] engine OK")
-except Exception as e:
-    print("[ALPR] no disponible:", e)
-    alpr = None
-    ALPR_OK = False
+    from fast_alpr import ALPR as _ALPR_CLASS
+    _ALPR_AVAILABLE = True
+except Exception as _alpr_import_err:
+    print("[ALPR] import fast_alpr FALLO:", _alpr_import_err)
+    _ALPR_CLASS = None
+    _ALPR_AVAILABLE = False
+
+alpr = None
+ALPR_OK = False
+
+def _alpr_init_attempt():
+    global alpr, ALPR_OK
+    if not _ALPR_AVAILABLE: return False
+    try:
+        a = _ALPR_CLASS(
+            detector_model="yolo-v9-t-384-license-plate-end2end",
+            ocr_model="cct-xs-v1-global-model"
+        )
+        with _alpr_lock:
+            alpr = a
+            ALPR_OK = True
+        print("[ALPR] engine OK")
+        return True
+    except Exception as e:
+        print(f"[ALPR] init falló: {e}")
+        return False
+
+def _alpr_retry_loop():
+    """Reintenta cargar el modelo ALPR cada 60s si no está disponible.
+    Permite que el portal arranque aunque ONNX tarde en inicializar."""
+    time.sleep(2.0)  # deja que el portal levante primero
+    if _alpr_init_attempt(): return  # éxito en primer intento
+    print("[ALPR] modelo no cargó en arranque — reintentando en background...")
+    _send_alert_email("[Comunito] ALPR no disponible al arrancar",
+        "El portal arrancó pero el motor ALPR no cargó. Reintentando automáticamente cada 60s.")
+    retries = 0
+    while not ALPR_OK:
+        time.sleep(60.0)
+        retries += 1
+        print(f"[ALPR] intento #{retries}...")
+        if _alpr_init_attempt():
+            _send_alert_email("[Comunito] ALPR restaurado",
+                f"El motor ALPR cargó correctamente en el intento #{retries}.")
+            return
 
 def run_alpr(image_bgr, resize_max_w, topk=3):
     if not ALPR_OK or image_bgr is None:
@@ -1371,6 +1462,32 @@ def _sysmon_loop():
             pass
         time.sleep(1.0)
 
+# ========== Alertas por correo ==========
+def _send_alert_email(subject: str, body: str):
+    """Envía email de alerta vía SMTP. Silencioso si no está configurado."""
+    try:
+        c = cfg
+        if not c.get("alert_email_enabled", False): return
+        to_addr  = (c.get("alert_email_to","") or "").strip()
+        user     = (c.get("alert_smtp_user","") or "").strip()
+        password = (c.get("alert_smtp_pass","") or "").strip()
+        host     = (c.get("alert_smtp_host","smtp.gmail.com") or "smtp.gmail.com").strip()
+        port     = int(c.get("alert_smtp_port", 587) or 587)
+        if not (to_addr and user and password): return
+        try: host_id = socket.gethostname()
+        except: host_id = "pi"
+        msg = MIMEText(f"{body}\n\nHost: {host_id}\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"]    = user
+        msg["To"]      = to_addr
+        with smtplib.SMTP(host, port, timeout=10) as srv:
+            srv.starttls()
+            srv.login(user, password)
+            srv.sendmail(user, [to_addr], msg.as_string())
+        print(f"[ALERT] Email enviado a {to_addr}: {subject}")
+    except Exception as e:
+        print(f"[ALERT] No se pudo enviar email: {e}")
+
 def _internal_watchdog_loop():
     """Si _sysmon_loop deja de actualizar por más de 90s, forzamos reinicio del proceso.
     Esto atrapa deadlocks del GIL o freeze del event loop principal."""
@@ -1381,7 +1498,10 @@ def _internal_watchdog_loop():
         try:
             elapsed = time.time() - _sysmon_last_alive
             if elapsed > WATCHDOG_TIMEOUT:
-                print(f"[WATCHDOG] sysmon sin respuesta {elapsed:.0f}s — forzando reinicio", flush=True)
+                msg = f"[WATCHDOG] sysmon sin respuesta {elapsed:.0f}s — forzando reinicio"
+                print(msg, flush=True)
+                _send_alert_email("[Comunito] REINICIO FORZADO por watchdog", msg)
+                time.sleep(2)  # dar tiempo al email
                 os.kill(os.getpid(), 9)
         except Exception:
             pass
@@ -3136,14 +3256,15 @@ threading.Thread(target=_motion_loop, args=(2,), daemon=True).start()
 threading.Thread(target=_auto_refresh_loop, daemon=True).start()
 threading.Thread(target=_sysmon_loop, daemon=True).start()
 threading.Thread(target=_heartbeat_scheduler_loop, daemon=True).start()
+threading.Thread(target=_alpr_retry_loop, daemon=True).start()
 threading.Thread(target=_internal_watchdog_loop, daemon=True).start()
 
 if __name__=="__main__":
     os.environ["TZ"]="America/Mexico_City"
-    os.environ["OMP_NUM_THREADS"]="2"
+    os.environ["OMP_NUM_THREADS"]="1"
     os.environ["OPENBLAS_NUM_THREADS"]="1"
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=5000, threads=8)
+        serve(app, host="0.0.0.0", port=5000, threads=4)
     except Exception:
         app.run(host="0.0.0.0", port=5000, threaded=True)
