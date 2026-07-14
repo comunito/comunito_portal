@@ -84,6 +84,13 @@ echo "==> 8) Habilitar servicio"
 sudo systemctl daemon-reload
 sudo systemctl enable comunito-portal.service --now
 
+echo "==> 9) Proteger tarjeta SD (tmpfs en /var/log)"
+if ! grep -q "tmpfs /var/log" /etc/fstab; then
+  echo "tmpfs   /var/log    tmpfs   defaults,noatime,nosuid,mode=0755,size=50m    0 0" | sudo tee -a /etc/fstab
+  sudo mount -a || true
+  sudo systemctl restart rsyslog || true
+fi
+
 IP_NOW="$(hostname -I | awk '{print $1}')"
 echo
 echo "==> Listo:"
