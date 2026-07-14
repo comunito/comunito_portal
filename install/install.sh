@@ -28,6 +28,8 @@ else
   sudo rm -rf "$APP_DIR"
   git clone https://github.com/comunito/comunito_portal.git "$APP_DIR"
 fi
+# Asegurar que todos los archivos del repo pertenecen al usuario actual
+sudo chown -R "$ME:$ME" "$APP_DIR"
 
 echo "==> 3) Crear venv e instalar requirements"
 python3 -m venv "$VENV"
