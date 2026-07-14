@@ -76,12 +76,12 @@ function doGet(e) {
   return HtmlService.createHtmlOutput(buildHtml_()).setTitle('Bitácora Comunito').setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-function feedJson_() {
+function getFeedData() {
   const ss = SpreadsheetApp.getActive();
   const sh = ss.getSheetByName(LOG_SHEET);
-  if (!sh) return json_({});
+  if (!sh) return {};
   const data = sh.getDataRange().getValues();
-  if (data.length < 2) return json_({});
+  if (data.length < 2) return {};
 
   const hdr = data[0];
   const iDate=hdr.indexOf('Fecha'), iTime=hdr.indexOf('Hora'),
@@ -104,7 +104,11 @@ function feedJson_() {
       view:  String(row[iView]||''),
     });
   }
-  return json_(grouped);
+  return grouped;
+}
+
+function feedJson_() {
+  return json_(getFeedData());
 }
 
 function json_(obj) {
@@ -189,7 +193,6 @@ header h1{font-size:1.2rem;font-weight:700}
 <div class="grid">${colHeaders}</div>
 <script>
 const COLS = ${colsJson};
-const BASE_URL = window.location.href.split('?')[0];
 
 function catClass(cat){
   const c=(cat||'').toLowerCase();
@@ -219,15 +222,17 @@ function renderCol(key, items){
   }).join('');
 }
 
-async function loadFeed(){
-  try{
-    const r = await fetch(BASE_URL+'?action=feed&t='+Date.now());
-    const data = await r.json();
-    COLS.forEach(c => renderCol(c.key, data[c.key]||[]));
-    document.getElementById('lastUpdate').textContent='Actualizado '+new Date().toLocaleTimeString('es-MX');
-  } catch(err){
-    document.getElementById('lastUpdate').textContent='Error al cargar';
-  }
+function loadFeed(){
+  google.script.run
+    .withSuccessHandler(function(data) {
+      COLS.forEach(c => renderCol(c.key, data[c.key]||[]));
+      document.getElementById('lastUpdate').textContent='Actualizado '+new Date().toLocaleTimeString('es-MX');
+    })
+    .withFailureHandler(function(err) {
+      document.getElementById('lastUpdate').textContent='Error al cargar';
+      console.error(err);
+    })
+    .getFeedData();
 }
 loadFeed();
 setInterval(loadFeed, 30000);
