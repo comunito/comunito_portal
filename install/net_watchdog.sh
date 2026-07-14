@@ -3,9 +3,9 @@
 # Ejecutado cada 3 min por cron. Restaura conectividad y acceso remoto.
 
 LOG=/var/log/net_watchdog.log
+FAIL_COUNT_FILE=/tmp/net_watchdog_fails
 MAX_LOG=50000  # bytes máx antes de rotar
 
-# Rotar log si crece demasiado
 if [ -f "$LOG" ] && [ $(stat -c%s "$LOG" 2>/dev/null || echo 0) -gt $MAX_LOG ]; then
     mv "$LOG" "${LOG}.1"
 fi
@@ -18,8 +18,19 @@ ping -c2 -W3 8.8.8.8 &>/dev/null && NET_OK=true
 $NET_OK || ping -c2 -W3 1.1.1.1 &>/dev/null && NET_OK=true
 
 if ! $NET_OK; then
-    log "[NET] Sin conectividad — reiniciando interfaz de red"
-    # Reiniciar interfaz activa (eth0 o wlan0)
+    FAILS=$(cat "$FAIL_COUNT_FILE" 2>/dev/null || echo 0)
+    FAILS=$((FAILS+1))
+    echo "$FAILS" > "$FAIL_COUNT_FILE"
+
+    log "[NET] Sin conectividad (falla $FAILS/4) — reiniciando interfaces"
+    
+    if [ "$FAILS" -ge 4 ]; then
+        log "[FATAL] Sin red por más de 12 minutos. El driver WiFi pudo haber colapsado. FORZANDO REBOOT."
+        sleep 2
+        /sbin/reboot
+        exit 1
+    fi
+
     for IFACE in eth0 wlan0; do
         if ip link show "$IFACE" &>/dev/null; then
             ip link set "$IFACE" down
@@ -28,10 +39,12 @@ if ! $NET_OK; then
             sleep 3
         fi
     done
-    # Si hay wpa_supplicant (WiFi), reiniciarlo
     systemctl is-active --quiet wpa_supplicant && systemctl restart wpa_supplicant
     sleep 5
-    ping -c2 -W5 8.8.8.8 &>/dev/null && log "[NET] Recuperada" || log "[NET] Sin red tras reinicio"
+    ping -c2 -W5 8.8.8.8 &>/dev/null && { log "[NET] Recuperada"; echo 0 > "$FAIL_COUNT_FILE"; } || log "[NET] Sin red tras intento"
+else
+    # Red bien, resetear contador
+    echo 0 > "$FAIL_COUNT_FILE"
 fi
 
 # 2. Verificar Tailscale
@@ -39,10 +52,9 @@ if ! tailscale status &>/dev/null; then
     log "[TS] Tailscale caído — reiniciando tailscaled"
     systemctl restart tailscaled
     sleep 5
-    tailscale status &>/dev/null && log "[TS] Tailscale restaurado" || log "[TS] Tailscale aún caído"
 fi
 
-# 3. Verificar portal ALPR (si está habilitado y caído, reiniciar)
+# 3. Verificar portal ALPR
 if systemctl is-enabled --quiet comunito-portal 2>/dev/null; then
     if ! systemctl is-active --quiet comunito-portal; then
         log "[PORTAL] Servicio caído — reiniciando"
