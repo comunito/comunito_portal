@@ -227,6 +227,7 @@ DEFAULTS = {
     # Alertas por correo
     "alert_email_enabled": False,
     "alert_email_to": "",
+    "alert_email_to2": "",
     "alert_smtp_user": "",
     "alert_smtp_pass": "",
     "alert_smtp_host": "smtp.gmail.com",
@@ -1463,27 +1464,29 @@ def _sysmon_loop():
 
 # ========== Alertas por correo ==========
 def _send_alert_email(subject: str, body: str):
-    """Envía email de alerta vía SMTP. Silencioso si no está configurado."""
+    """Envía email de alerta vía SMTP a 1 o 2 destinatarios. Silencioso si no está configurado."""
     try:
         c = cfg
         if not c.get("alert_email_enabled", False): return
-        to_addr  = (c.get("alert_email_to","") or "").strip()
+        to1     = (c.get("alert_email_to","") or "").strip()
+        to2     = (c.get("alert_email_to2","") or "").strip()
         user     = (c.get("alert_smtp_user","") or "").strip()
         password = (c.get("alert_smtp_pass","") or "").strip()
         host     = (c.get("alert_smtp_host","smtp.gmail.com") or "smtp.gmail.com").strip()
         port     = int(c.get("alert_smtp_port", 587) or 587)
-        if not (to_addr and user and password): return
+        recipients = [a for a in [to1, to2] if a]
+        if not (recipients and user and password): return
         try: host_id = socket.gethostname()
         except: host_id = "pi"
         msg = MIMEText(f"{body}\n\nHost: {host_id}\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "plain", "utf-8")
         msg["Subject"] = subject
         msg["From"]    = user
-        msg["To"]      = to_addr
+        msg["To"]      = ", ".join(recipients)
         with smtplib.SMTP(host, port, timeout=10) as srv:
             srv.starttls()
             srv.login(user, password)
-            srv.sendmail(user, [to_addr], msg.as_string())
-        print(f"[ALERT] Email enviado a {to_addr}: {subject}")
+            srv.sendmail(user, recipients, msg.as_string())
+        print(f"[ALERT] Email enviado a {', '.join(recipients)}: {subject}")
     except Exception as e:
         print(f"[ALERT] No se pudo enviar email: {e}")
 
@@ -2234,6 +2237,31 @@ SETTINGS_INDEX = """
       Último OK: <b>{{hb_last_ok}}</b> • Último intento: <b>{{hb_last_try}}</b> • Code: <b>{{hb_last_code}}</b> • Error: <b>{{hb_last_err}}</b>
     </p>
 <p class="muted">El heartbeat incluye temp/cpu/colas y último estado por cámara.</p>
+    <h3>Alertas por correo</h3>
+    <label><input type="checkbox" name="alert_email_enabled" {{'checked' if alert_email_enabled else ''}}> Activar alertas por correo</label>
+    <label>Correo destinatario 1:
+      <input type="email" name="alert_email_to" value="{{alert_email_to}}" placeholder="correo@ejemplo.com">
+    </label>
+    <label>Correo destinatario 2 (opcional):
+      <input type="email" name="alert_email_to2" value="{{alert_email_to2}}" placeholder="correo2@ejemplo.com">
+    </label>
+    <label>Correo remitente (Gmail/SMTP):
+      <input type="email" name="alert_smtp_user" value="{{alert_smtp_user}}" placeholder="tu@gmail.com">
+    </label>
+    <label>Contraseña / App Password:
+      <input type="password" name="alert_smtp_pass" value="{{alert_smtp_pass}}" placeholder="App password de Google">
+    </label>
+    <label>Servidor SMTP:
+      <input type="text" name="alert_smtp_host" value="{{alert_smtp_host}}" placeholder="smtp.gmail.com">
+    </label>
+    <label>Puerto SMTP:
+      <input type="number" name="alert_smtp_port" value="{{alert_smtp_port}}" placeholder="587">
+    </label>
+    <p>
+      <button class="btn" name="action" value="alert_test">📧 Enviar correo de prueba</button>
+      <span class="muted">{{alert_msg}}</span>
+    </p>
+    <p class="muted">Para Gmail usa una <b>App Password</b> (Google &gt; Seguridad &gt; Contraseñas de aplicaciones).</p>
     <p style="margin-top:10px">
       <button class="btn">Guardar</button>
       <a class="btn" href="/">Volver</a>
@@ -2557,6 +2585,14 @@ def settings_index():
         cfg["monitor_enabled"]=bool(request.form.get("monitor_enabled"))
         cfg["monitor_url"]=(request.form.get("monitor_url") or "").strip()
         cfg["monitor_period_min"]=_clampi(request.form.get("monitor_period_min", cfg.get("monitor_period_min",0)),0,1440,cfg.get("monitor_period_min",0))
+        # Alertas por correo
+        cfg["alert_email_enabled"]=bool(request.form.get("alert_email_enabled"))
+        cfg["alert_email_to"]=(request.form.get("alert_email_to") or "").strip()
+        cfg["alert_email_to2"]=(request.form.get("alert_email_to2") or "").strip()
+        cfg["alert_smtp_user"]=(request.form.get("alert_smtp_user") or "").strip()
+        cfg["alert_smtp_pass"]=(request.form.get("alert_smtp_pass") or "").strip()
+        cfg["alert_smtp_host"]=(request.form.get("alert_smtp_host") or "smtp.gmail.com").strip()
+        cfg["alert_smtp_port"]=_clampi(request.form.get("alert_smtp_port",587),1,65535,587)
         save_cfg(cfg)
 
         # Acción: probar heartbeat (no bloquea)
@@ -2567,6 +2603,13 @@ def settings_index():
                 hb_msg="Encolado (manual_test). Revisa el receptor / monitor."
             except Exception as e:
                 hb_msg=f"Error encolando: {e}"
+        elif action=="alert_test":
+            try:
+                _send_alert_email("[Comunito] Prueba de alerta",
+                    "Este es un correo de prueba enviado manualmente desde el portal ALPR.")
+                alert_msg="Correo de prueba enviado correctamente."
+            except Exception as e:
+                alert_msg=f"Error: {e}"
         else:
             hb_msg="Guardado."
 
@@ -2578,6 +2621,8 @@ def settings_index():
         except Exception:
             return "—"
 
+    hb_msg = hb_msg
+    alert_msg = alert_msg if 'alert_msg' in dir() else ""
     return render_template_string(
         SETTINGS_INDEX,
         api_token=cfg.get("api_token",""),
@@ -2589,6 +2634,14 @@ def settings_index():
         hb_last_try=_fmt_ts(hb_status.get("last_try_ts",0.0)),
         hb_last_code=(hb_status.get("last_code", None) if hb_status.get("last_code",None) is not None else "—"),
         hb_last_err=(hb_status.get("last_err","") or "—"),
+        alert_email_enabled=cfg.get("alert_email_enabled",False),
+        alert_email_to=cfg.get("alert_email_to",""),
+        alert_email_to2=cfg.get("alert_email_to2",""),
+        alert_smtp_user=cfg.get("alert_smtp_user",""),
+        alert_smtp_pass=cfg.get("alert_smtp_pass",""),
+        alert_smtp_host=cfg.get("alert_smtp_host","smtp.gmail.com"),
+        alert_smtp_port=cfg.get("alert_smtp_port",587),
+        alert_msg=alert_msg,
     )
 
 
