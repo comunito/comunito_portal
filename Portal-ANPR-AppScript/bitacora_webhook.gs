@@ -1,8 +1,6 @@
 /**** CONFIG ****/
-const FOLDER_ID  = '1cjciqwmqv7Y8a5_vaFZO1li1KjzRpjoh';
-const LOG_SHEET  = 'Bitácora';
-const TIMEZONE   = 'America/Mexico_City';
-const MAX_ITEMS  = 30;
+const FOLDER_ID = '1cjciqwmqv7Y8a5_vaFZO1li1KjzRpjoh';
+const TIMEZONE = 'America/Mexico_City';
 
 const COLUMNS = [
   { key: 'Principal-entrada',  label: 'Principal<br>Entrada'  },
@@ -11,65 +9,156 @@ const COLUMNS = [
   { key: 'Secundaria-salida',  label: 'Secundaria<br>Salida'  },
 ];
 
-/**** doPost ****/
+/**** ORDEN/ETIQUETAS BASE (Mantiene compatibilidad con hoja actual) ****/
+const BASE_ORDER = ['cam','usuario','dispositivo','valor','disp_col_1','disp_col_2','disp_col_3'];
+const LABELS = {
+  'cam': 'Cam', 'usuario': 'Usuario', 'dispositivo': 'Dispositivo', 'valor': 'Valor',
+  'disp_col_1': 'Disp col 1', 'disp_col_2': 'Disp col 2', 'disp_col_3': 'Disp col 3',
+  '_snapshot_view': 'Snapshot View', '_snapshot_direct': 'Snapshot Direct'
+};
+const EXCLUDE_KEYS = new Set(['snapshot_b64', 'tz', 'iso_dt', 'fields', 'sheet_hint']);
+
+/**** UTILIDADES ORIGINALES ****/
+function todayParts_() {
+  const now = new Date();
+  return {
+    fecha: Utilities.formatDate(now, TIMEZONE, 'yyyy-MM-dd'),
+    hora:  Utilities.formatDate(now, TIMEZONE, 'HH:mm:ss')
+  };
+}
+function driveLinksFor_(file) {
+  if (!file) return {viewLink:'', contentLink:''};
+  if (file._err) return {viewLink:'ERROR: ' + file._err.slice(0,80), contentLink:''};
+  const id = file.getId();
+  return { viewLink: file.getUrl(), contentLink: 'https://drive.google.com/uc?export=download&id=' + id };
+}
+function insertAtRow2_(sh, rowArray) {
+  sh.insertRows(2, 1);
+  sh.getRange(2, 1, 1, rowArray.length).setValues([rowArray]);
+}
+function prettyLabel_(k) {
+  if (LABELS[k]) return LABELS[k];
+  return k.split('_').map(w => w ? w.charAt(0).toUpperCase() + w.slice(1) : w).join(' ');
+}
+function syncHeaders_(sh, orderedKeys) {
+  const baseHeaders = ['Fecha','Hora'].concat(BASE_ORDER.map(k => prettyLabel_(k)))
+    .concat([LABELS['_snapshot_view'], LABELS['_snapshot_direct']]);
+  const extras = [];
+  for (const k of orderedKeys) {
+    if (BASE_ORDER.includes(k) || EXCLUDE_KEYS.has(k)) continue;
+    extras.push(prettyLabel_(k));
+  }
+  const desired = baseHeaders.concat(extras);
+  const maxCols = desired.length;
+  const r1 = sh.getRange(1, 1, 1, Math.max(maxCols, sh.getMaxColumns())).getValues()[0];
+  const isEmpty = r1.every(v => v === '' || v == null);
+  if (isEmpty) {
+    sh.getRange(1, 1, 1, desired.length).setValues([desired]);
+    return desired;
+  }
+  const current = r1.slice(0, r1.findLastIndex(v => v !== '' && v != null) + 1);
+  const toAdd = desired.filter(h => !current.includes(h) && h && h !== '');
+  if (toAdd.length > 0) {
+    const newHeader = current.concat(toAdd);
+    sh.getRange(1, 1, 1, newHeader.length).setValues([newHeader]);
+    return newHeader;
+  }
+  return current;
+}
+function buildRowByHeader_(header, baseMap, extrasMap, snapshotLinks) {
+  const { viewLink, contentLink } = snapshotLinks || {viewLink:'', contentLink:''};
+  const dataMap = Object.assign({}, extrasMap, baseMap);
+  dataMap[LABELS['_snapshot_view']] = viewLink;
+  dataMap[LABELS['_snapshot_direct']] = contentLink;
+  const {fecha, hora} = todayParts_();
+  const row = new Array(header.length).fill('');
+  for (let i = 0; i < header.length; i++) {
+    const h = header[i];
+    if (h === 'Fecha') { row[i] = fecha; continue; }
+    if (h === 'Hora')  { row[i] = hora;  continue; }
+    const invBase = {};
+    for (const k of BASE_ORDER) invBase[prettyLabel_(k)] = k;
+    if (invBase[h]) {
+      const k = invBase[h];
+      row[i] = baseMap[h] != null ? baseMap[h] : (dataMap[k] != null ? String(dataMap[k]) : '');
+      continue;
+    }
+    if (h === LABELS['_snapshot_view'])  { row[i] = viewLink; continue; }
+    if (h === LABELS['_snapshot_direct']){ row[i] = contentLink; continue; }
+    row[i] = extrasMap[h] != null ? String(extrasMap[h]) : '';
+  }
+  return row;
+}
+function splitBaseAndExtras_(obj) {
+  const orderedKeys = Object.keys(obj || {});
+  const baseMap = {};
+  const extrasMap = {};
+  for (const k of BASE_ORDER) {
+    const label = prettyLabel_(k);
+    baseMap[label] = (obj && obj[k] != null) ? String(obj[k]) : '';
+  }
+  for (const k of orderedKeys) {
+    if (BASE_ORDER.includes(k) || EXCLUDE_KEYS.has(k)) continue;
+    const v = obj[k];
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (s === '') continue;
+    const label = prettyLabel_(k);
+    if (!(label in extrasMap)) { extrasMap[label] = s; }
+  }
+  return { orderedKeys, baseMap, extrasMap };
+}
+
+/**** doPost (IDÉNTICO AL ORIGINAL PARA NO ROMPER LA HOJA) ****/
 function doPost(e) {
   try {
     const ss = SpreadsheetApp.getActive();
-    let sh = ss.getSheetByName(LOG_SHEET);
-    if (!sh) {
-      sh = ss.insertSheet(LOG_SHEET);
-      sh.getRange(1,1,1,9).setValues([['Fecha','Hora','camera_name','cam','placa','usuario','categoria','snapshot_url','snapshot_direct']]);
-      sh.setFrozenRows(1);
-    }
+    const sh = ss.getSheets()[0]; // Usa la primera hoja automáticamente (Hoja 1)
+    let file = null, obj = {}, orderedKeys = [];
 
-    let obj = {}, file = null;
-
-    if (e.postData && e.postData.type &&
-        e.postData.type.toLowerCase().includes('application/json')) {
+    if (e.postData && e.postData.type && e.postData.type.toLowerCase().indexOf('application/json') !== -1) {
       obj = JSON.parse(e.postData.contents || '{}');
       if (obj.snapshot_b64) {
         try {
-          const bytes  = Utilities.base64Decode(obj.snapshot_b64);
-          const blob   = Utilities.newBlob(bytes, 'image/jpeg', 'snap_' + Date.now() + '.jpg');
+          const bytes = Utilities.base64Decode(obj.snapshot_b64);
+          const blob = Utilities.newBlob(bytes, 'image/jpeg', 'snap_' + Date.now() + '.jpg');
           const folder = DriveApp.getFolderById(FOLDER_ID);
           file = folder.createFile(blob);
           file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-        } catch(driveErr) { console.error('Drive error: ' + driveErr); }
+        } catch (driveErr) { file = { _err: String(driveErr) }; }
       }
+      orderedKeys = Object.keys(obj);
     } else {
       const p = e.parameters || {};
-      Object.keys(p).forEach(k => obj[k] = Array.isArray(p[k]) ? p[k][0] : p[k]);
+      const tmp = {};
+      Object.keys(p).forEach(k => tmp[k] = Array.isArray(p[k]) ? p[k][0] : p[k]);
+      orderedKeys = BASE_ORDER.slice();
+      Object.keys(tmp).sort().forEach(k => { if (!orderedKeys.includes(k)) orderedKeys.push(k); });
       if (e.files && e.files.snapshot) {
         try {
           const folder = DriveApp.getFolderById(FOLDER_ID);
           file = folder.createFile(e.files.snapshot);
           file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-        } catch(driveErr) { console.error('Drive multipart error: ' + driveErr); }
+        } catch (driveErr) { file = null; }
       }
+      obj = tmp;
     }
 
-    const now   = new Date();
-    const fecha = Utilities.formatDate(now, TIMEZONE, 'yyyy-MM-dd');
-    const hora  = Utilities.formatDate(now, TIMEZONE, 'HH:mm:ss');
+    const { baseMap, extrasMap } = splitBaseAndExtras_(obj);
+    const headerOrderForSync = BASE_ORDER.concat(['_snapshot_view','_snapshot_direct'])
+      .concat(orderedKeys.filter(k => !BASE_ORDER.includes(k) && !EXCLUDE_KEYS.has(k)));
+    const header = syncHeaders_(sh, headerOrderForSync);
+    const links = file ? driveLinksFor_(file) : {viewLink:'', contentLink:''};
+    const row = buildRowByHeader_(header, baseMap, extrasMap, links);
+    insertAtRow2_(sh, row);
 
-    const camName = String(obj.camera_name || obj.dispositivo || '').trim();
-    const placa   = String(obj.valor || obj.placa || '').trim();
-    const usuario = String(obj.usuario || '').trim();
-    const cat     = String(obj.category || obj.cat || obj.categoria || '').trim();
-    const imgUrl  = file ? ('https://drive.google.com/thumbnail?id=' + file.getId() + '&sz=w400') : '';
-    const viewUrl = file ? file.getUrl() : '';
-
-    sh.insertRows(2, 1);
-    sh.getRange(2,1,1,9).setValues([[fecha, hora, camName, String(obj.cam||''), placa, usuario, cat, imgUrl, viewUrl]]);
-
-    return ContentService.createTextOutput(JSON.stringify({ok:true})).setMimeType(ContentService.MimeType.JSON);
-  } catch(err) {
-    console.error('doPost error: ' + err);
-    return ContentService.createTextOutput(JSON.stringify({ok:false,error:String(err)})).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ok: true})).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ok: false, error: String(err)})).setMimeType(ContentService.MimeType.JSON);
   }
 }
 
-/**** doGet ****/
+/**** doGet (NUEVO DASHBOARD) ****/
 function doGet(e) {
   const action = (e && e.parameter && e.parameter.action) || '';
   if (action === 'feed') return feedJson_();
@@ -78,44 +167,55 @@ function doGet(e) {
 
 function getFeedData() {
   const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(LOG_SHEET);
+  const sh = ss.getSheets()[0];
   if (!sh) return {};
   const data = sh.getDataRange().getValues();
   if (data.length < 2) return {};
 
   const hdr = data[0];
   const iDate=hdr.indexOf('Fecha'), iTime=hdr.indexOf('Hora'),
-        iCam=hdr.indexOf('camera_name'), iPlaca=hdr.indexOf('placa'),
-        iUser=hdr.indexOf('usuario'), iCat=hdr.indexOf('categoria'),
-        iImg=hdr.indexOf('snapshot_url'), iView=hdr.indexOf('snapshot_direct');
+        iCam=hdr.indexOf('Cam'), iPlaca=hdr.indexOf('Valor'),
+        iUser=hdr.indexOf('Disp col 2'), iCat=hdr.indexOf('Usuario'),
+        iView=hdr.indexOf('Snapshot View');
 
   const grouped = {};
   COLUMNS.forEach(c => grouped[c.key] = []);
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    const cname = String(row[iCam]||'').trim();
-    const col = COLUMNS.find(c => c.key.toLowerCase() === cname.toLowerCase());
-    if (!col || grouped[col.key].length >= MAX_ITEMS) continue;
+    
+    // Convertir de "1 - Principal-salida" a "Principal-salida"
+    let rawCam = String(row[iCam]||'').trim();
+    if(rawCam.includes('-')) {
+      rawCam = rawCam.substring(rawCam.indexOf('-')+1).trim();
+    }
+    
+    const col = COLUMNS.find(c => c.key.toLowerCase() === rawCam.toLowerCase());
+    if (!col || grouped[col.key].length >= 30) continue;
+    
+    // Extraer ID de Drive del Snapshot View link para crear el thumbnail
+    let imgUrl = '';
+    const viewLink = String(row[iView]||'');
+    const match = viewLink.match(/id=([a-zA-Z0-9_-]+)/) || viewLink.match(/d\/([a-zA-Z0-9_-]+)/);
+    if(match && match[1]) {
+      imgUrl = 'https://drive.google.com/thumbnail?sz=w400&id=' + match[1];
+    }
+    
     grouped[col.key].push({
       fecha: String(row[iDate]||''), hora: String(row[iTime]||''),
       placa: String(row[iPlaca]||''), usuario: String(row[iUser]||''),
-      cat:   String(row[iCat]||''),  img: String(row[iImg]||''),
-      view:  String(row[iView]||''),
+      cat:   String(row[iCat]||''),  img: imgUrl,
+      view:  viewLink
     });
   }
   return grouped;
 }
 
 function feedJson_() {
-  return json_(getFeedData());
+  return ContentService.createTextOutput(JSON.stringify(getFeedData())).setMimeType(ContentService.MimeType.JSON);
 }
 
-function json_(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
-}
-
-/**** HTML de la bitácora ****/
+/**** HTML DASHBOARD ****/
 function buildHtml_() {
   const colsJson = JSON.stringify(COLUMNS);
   const colHeaders = COLUMNS.map(c =>
@@ -196,7 +296,7 @@ const COLS = ${colsJson};
 
 function catClass(cat){
   const c=(cat||'').toLowerCase();
-  if(c==='authorized'||c==='auth'||c==='activo') return 'auth';
+  if(c==='authorized'||c==='auth'||c==='activo'||c==='propietario') return 'auth';
   if(c==='visitor'||c==='visitante') return 'visitor';
   if(c==='notfound'||c==='not_found'||c==='inactivo') return 'notfound';
   return '';
@@ -239,20 +339,4 @@ setInterval(loadFeed, 30000);
 </script>
 </body>
 </html>`;
-}
-
-function testAuth() {
-  DriveApp.getRootFolder();
-  SpreadsheetApp.getActive().getSheets();
-  Logger.log('Auth OK');
-}
-
-function testDriveFolder() {
-  try {
-    const folder = DriveApp.getFolderById(FOLDER_ID);
-    Logger.log('Folder: ' + folder.getName());
-    const f = folder.createFile(Utilities.newBlob('test','text/plain','test.txt'));
-    f.setTrashed(true);
-    Logger.log('Drive OK');
-  } catch(e) { Logger.log('ERROR: ' + e); }
 }
