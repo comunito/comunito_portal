@@ -1845,6 +1845,7 @@ def _alpr_loop(cam:int):
             else:
                 enqueue_webhooks(cam, "NOTFOUND", pair, "NoFound", "Placa", text, ["","",""], ["Folio","Nombre","Telefono"])
 
+            # Actualizar estado visible en portal (TODOS: auth, inactive, notfound)
             with slock[cam-1]:
                 states[cam-1]["plate"]=text
                 states[cam-1]["conf"]=float(conf)
@@ -1853,7 +1854,7 @@ def _alpr_loop(cam:int):
                 states[cam-1]["cat"]=cat
                 states[cam-1]["display"]=disp_vals
                 states[cam-1]["titles"]=titles
-                states[cam-1]["user_type"]=user_type
+                states[cam-1]["user_type"]=user_type if user_type!="NONE" else "NoFound"
 
             time.sleep(0.005)
 
@@ -2020,7 +2021,7 @@ async function openGate(cam){
   }catch(e){m.textContent='Error: '+e;} finally{setTimeout(()=>m.textContent='',1500);}
 }
 
-setInterval(poll,2500);
+setInterval(poll,800);
 poll();
 </script>
 """
