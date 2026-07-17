@@ -278,7 +278,7 @@ def load_cfg():
             wk["search_end_col"]   = col_to_idx(wk.get("search_end_col",18),18)
             if wk["search_end_col"] < wk["search_start_col"]:
                 wk["search_end_col"] = wk["search_start_col"]
-            wk["status_col"] = col_to_idx(wk.get("status_col",3),3)
+            wk["status_col"] = col_to_idx(wk.get("status_col",14),14)
             wk["auto_refresh_min"] = _clampi(wk.get("auto_refresh_min",0),0,1440,0)
             wk["disp_cols"] = _norm_cols_any(wk.get("disp_cols",[2,3,4]),3)
             if not isinstance(wk.get("disp_titles"), list) or len(wk["disp_titles"]) < 3:
@@ -330,7 +330,7 @@ def load_cfg():
         wk["search_end_col"]   = col_to_idx(wk.get("search_end_col",18),18)
         if wk["search_end_col"] < wk["search_start_col"]:
             wk["search_end_col"] = wk["search_start_col"]
-        wk["status_col"] = col_to_idx(wk.get("status_col",3),3)
+        wk["status_col"] = col_to_idx(wk.get("status_col",14),14)
         wk["auto_refresh_min"] = _clampi(wk.get("auto_refresh_min",0),0,1440,0)
         wk["disp_cols"] = _norm_cols_any(wk.get("disp_cols",[2,3,4]),3)
         if not isinstance(wk.get("disp_titles"), list) or len(wk["disp_titles"]) < 3:
@@ -2686,7 +2686,7 @@ def _section_from_form(prefix:str, sec:dict):
     sec["search_end_col"]   = col_to_idx(request.form.get(prefix+"_search_end_col", sec.get("search_end_col",18)), sec.get("search_end_col",18))
     if sec["search_end_col"] < sec["search_start_col"]:
         sec["search_end_col"] = sec["search_start_col"]
-    sec["status_col"] = col_to_idx(request.form.get(prefix+"_status_col", sec.get("status_col",3)), sec.get("status_col",3))
+    sec["status_col"] = col_to_idx(request.form.get(prefix+"_status_col", sec.get("status_col",14)), sec.get("status_col",14))
     c1=request.form.get(prefix+"_disp_col_1", sec.get("disp_cols",[2,3,4])[0])
     c2=request.form.get(prefix+"_disp_col_2", sec.get("disp_cols",[2,3,4])[1])
     c3=request.form.get(prefix+"_disp_col_3", sec.get("disp_cols",[2,3,4])[2])
