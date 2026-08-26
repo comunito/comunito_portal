@@ -642,9 +642,18 @@ class VideoSource:
             if self.last_ip and not _ping(self.last_ip,1):
                 time.sleep(0.5); continue
             cap=None
+            _used_gst=False
             try:
-                print(f"[CAM{self.cidx+1}] opening via OpenCV/FFmpeg only")
-                cap=self._open_cv(url)
+                # Intentar GStreamer primero (latency=0, max-buffers=1, drop=true)
+                # GStreamer descarta frames viejos → siempre frame actual sin buffer acumulado
+                cap=self._open_gst(url)
+                if cap and cap.isOpened():
+                    _used_gst=True
+                    print(f"[CAM{self.cidx+1}] opening via GStreamer (low-latency) ✅")
+                else:
+                    # Fallback: OpenCV/FFmpeg
+                    print(f"[CAM{self.cidx+1}] GStreamer falló, usando OpenCV/FFmpeg")
+                    cap=self._open_cv(url)
                 if not cap or not cap.isOpened():
                     time.sleep(0.6); continue
 
