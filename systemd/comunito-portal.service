@@ -8,6 +8,9 @@ TimeoutStartSec=0
 [Service]
 User=pi
 WorkingDirectory=/home/pi/comunito_portal
+Environment="OMP_NUM_THREADS=2"
+Environment="OPENBLAS_NUM_THREADS=2"
+Environment="PYTHONPATH=/usr/lib/python3/dist-packages"
 ExecStart=/home/pi/comunito_portal/comunito-venv/bin/python -u portal_alpr_full.py
 Restart=always
 RestartSec=5

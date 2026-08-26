@@ -11,7 +11,7 @@ SVC="/etc/systemd/system/comunito-portal.service"
 echo "==> 1) Paquetes base"
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  python3-full python3-venv python3-pip \
+  python3-full python3-venv python3-pip python3-opencv \
   libglib2.0-0 libxext6 libsm6 libxrender1 libgl1 \
   build-essential curl ca-certificates git unzip \
   network-manager tzdata iproute2 net-tools \
