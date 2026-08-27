@@ -5,3 +5,4 @@ fast-alpr[onnx]
 onnxruntime==1.20.0
 waitress
 pyserial
+cryptography>=42,<45

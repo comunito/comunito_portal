@@ -1,10 +1,10 @@
 from __future__ import annotations
-from flask import Flask, jsonify, render_template_string, Response, request, redirect, url_for
+from flask import Flask, jsonify, render_template_string, Response, request, redirect, url_for, send_file
 import cv2, threading, time, os, json, csv, requests, subprocess, re, datetime, base64, queue, glob
 import numpy as np
 from collections import OrderedDict
 from copy import deepcopy
-from io import StringIO
+from io import StringIO, BytesIO
 from zoneinfo import ZoneInfo
 import socket
 from urllib.parse import urlparse
@@ -33,6 +33,9 @@ cv2.setNumThreads(2)
 
 TZ = ZoneInfo("America/Mexico_City")
 CFG_FILE = "config_full.json"
+BACKUP_FORMAT = "comunito-config-backup"
+BACKUP_VERSION = 1
+BACKUP_MAX_BYTES = 2 * 1024 * 1024
 APP_TITLE = "Comunito Pi — ALPR FULL (2 cámaras, v6.7.6)"
 
 # ---------- Utils ----------
@@ -232,6 +235,10 @@ DEFAULTS = {
     "alert_smtp_pass": "",
     "alert_smtp_host": "smtp.gmail.com",
     "alert_smtp_port": 587,
+    # Respaldo externo opcional mediante Web App de Google Apps Script.
+    # El archivo viaja cifrado; la frase de respaldo nunca se guarda aquí.
+    "backup_drive_url": "",
+    "backup_drive_secret": "",
 }
 
 def load_cfg():
@@ -388,6 +395,90 @@ def _load_cfg_with_fallback():
     return {}
 
 cfg = load_cfg()
+
+# ---------- Respaldo cifrado de configuración ----------
+def _backup_crypto():
+    """Carga criptografía solo al usar respaldos para no afectar ALPR."""
+    try:
+        from cryptography.fernet import Fernet, InvalidToken
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        return Fernet, InvalidToken, hashes, PBKDF2HMAC
+    except Exception as exc:
+        raise RuntimeError("El módulo de respaldo no está instalado. Actualiza el portal con el instalador oficial.") from exc
+
+def _backup_key(passphrase: str, salt: bytes) -> bytes:
+    if len(passphrase or "") < 12:
+        raise ValueError("Usa una frase de respaldo de al menos 12 caracteres.")
+    _, _, hashes, PBKDF2HMAC = _backup_crypto()
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(), length=32, salt=salt, iterations=480000,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+
+def _backup_filename() -> str:
+    host = re.sub(r"[^a-zA-Z0-9_-]+", "-", socket.gethostname()).strip("-") or "pi"
+    stamp = datetime.datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+    return f"comunito-config-{host}-{stamp}.cbackup"
+
+def _make_config_backup(config: dict, passphrase: str) -> tuple[str, bytes]:
+    Fernet, _, _, _ = _backup_crypto()
+    salt = os.urandom(16)
+    payload = {
+        "format": BACKUP_FORMAT,
+        "version": BACKUP_VERSION,
+        "created_at": datetime.datetime.now(TZ).isoformat(),
+        "source_hostname": socket.gethostname(),
+        "config": config,
+    }
+    plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encrypted = Fernet(_backup_key(passphrase, salt)).encrypt(plaintext)
+    envelope = {
+        "format": BACKUP_FORMAT,
+        "version": BACKUP_VERSION,
+        "kdf": "PBKDF2-SHA256-480000",
+        "salt_b64": base64.b64encode(salt).decode("ascii"),
+        "ciphertext_b64": base64.b64encode(encrypted).decode("ascii"),
+    }
+    return _backup_filename(), json.dumps(envelope, ensure_ascii=False, indent=2).encode("utf-8")
+
+def _read_config_backup(blob: bytes, passphrase: str) -> dict:
+    if not blob or len(blob) > BACKUP_MAX_BYTES:
+        raise ValueError("Archivo de respaldo inválido o demasiado grande.")
+    Fernet, InvalidToken, _, _ = _backup_crypto()
+    try:
+        envelope = json.loads(blob.decode("utf-8"))
+        if envelope.get("format") != BACKUP_FORMAT or int(envelope.get("version", 0)) != BACKUP_VERSION:
+            raise ValueError("No es un respaldo compatible de Comunito.")
+        salt = base64.b64decode(envelope["salt_b64"], validate=True)
+        encrypted = base64.b64decode(envelope["ciphertext_b64"], validate=True)
+        payload = json.loads(Fernet(_backup_key(passphrase, salt)).decrypt(encrypted).decode("utf-8"))
+    except InvalidToken as exc:
+        raise ValueError("La frase de respaldo no coincide con el archivo.") from exc
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("El archivo de respaldo está dañado o no es válido.") from exc
+    config = payload.get("config") if isinstance(payload, dict) else None
+    if not isinstance(config, dict) or not isinstance(config.get("cameras"), list):
+        raise ValueError("El respaldo no contiene una configuración válida.")
+    return config
+
+def _upload_backup_to_drive(config: dict, passphrase: str) -> str:
+    url = (config.get("backup_drive_url") or "").strip()
+    secret = (config.get("backup_drive_secret") or "").strip()
+    if not url or not secret:
+        raise ValueError("Configura la URL y el secreto del respaldo de Google Drive.")
+    filename, blob = _make_config_backup(config, passphrase)
+    response = requests.post(url, json={
+        "action": "config_backup",
+        "secret": secret,
+        "filename": filename,
+        "backup_b64": base64.b64encode(blob).decode("ascii"),
+    }, timeout=(4, 20))
+    response.raise_for_status()
+    answer = response.json()
+    if not answer.get("ok"):
+        raise RuntimeError(answer.get("error") or "Google Drive rechazó el respaldo.")
+    return str(answer.get("file_name") or filename)
 
 # ========== Gate Serial Manager ==========
 class GateSerialManager:
@@ -2225,7 +2316,7 @@ SETTINGS_INDEX = """
     <a class="btn" href="/roi?cam=2" target="_blank">✂ ROI 2</a>
   </p>
   <hr>
-  <form method="post">
+  <form method="post" enctype="multipart/form-data">
     <h3>Seguridad</h3>
     <label>API Token (X-API-Key / ?api_key=):
       <input type="text" name="api_token" value="{{api_token}}" placeholder="opcional">
@@ -2272,6 +2363,32 @@ SETTINGS_INDEX = """
       <span class="muted">{{alert_msg}}</span>
     </p>
     <p class="muted">Para Gmail usa una <b>App Password</b> (Google &gt; Seguridad &gt; Contraseñas de aplicaciones).</p>
+    <hr>
+    <h3>Respaldo de configuración</h3>
+    <p class="muted">Incluye cámaras, ROI, ALPR, whitelist, pluma, auditoría y credenciales. El archivo se cifra antes de descargarse o enviarse a Drive. La frase no queda guardada en el Pi.</p>
+    <label>Frase de respaldo (mínimo 12 caracteres):
+      <input type="password" name="backup_passphrase" placeholder="Escríbela y guárdala fuera del Pi">
+    </label>
+    <p>
+      <button class="btn" name="action" value="backup_download">⬇️ Crear y descargar respaldo</button>
+    </p>
+    <label>Archivo de respaldo para importar:
+      <input type="file" name="backup_file" accept=".cbackup,application/json">
+    </label>
+    <p>
+      <button class="btn" name="action" value="backup_import">⬆️ Importar respaldo</button>
+    </p>
+    <div style="border:1px dashed #aaa;border-radius:10px;padding:10px;margin-top:10px">
+      <b>Google Drive (opcional)</b>
+      <label>URL del Web App de respaldo:
+        <input type="text" name="backup_drive_url" value="{{backup_drive_url}}" placeholder="https://script.google.com/macros/s/.../exec">
+      </label>
+      <label>Secreto de respaldo:
+        <input type="password" name="backup_drive_secret" value="{{backup_drive_secret}}" placeholder="Secreto creado en Apps Script">
+      </label>
+      <p><button class="btn" name="action" value="backup_drive">☁️ Crear respaldo en Google Drive</button></p>
+    </div>
+    {% if backup_msg %}<p class="muted"><b>{{backup_msg}}</b></p>{% endif %}
     <p style="margin-top:10px">
       <button class="btn">Guardar</button>
       <a class="btn" href="/">Volver</a>
@@ -2587,41 +2704,70 @@ def home():
 def settings_index():
     global cfg
     hb_msg=""
+    alert_msg=""
+    backup_msg=""
     if request.method=="POST":
         action=(request.form.get("action") or "save").strip()
-
-        # Guardar settings
-        cfg["api_token"]=(request.form.get("api_token") or "").strip()
-        cfg["monitor_enabled"]=bool(request.form.get("monitor_enabled"))
-        cfg["monitor_url"]=(request.form.get("monitor_url") or "").strip()
-        cfg["monitor_period_min"]=_clampi(request.form.get("monitor_period_min", cfg.get("monitor_period_min",0)),0,1440,cfg.get("monitor_period_min",0))
-        # Alertas por correo
-        cfg["alert_email_enabled"]=bool(request.form.get("alert_email_enabled"))
-        cfg["alert_email_to"]=(request.form.get("alert_email_to") or "").strip()
-        cfg["alert_email_to2"]=(request.form.get("alert_email_to2") or "").strip()
-        cfg["alert_smtp_user"]=(request.form.get("alert_smtp_user") or "").strip()
-        cfg["alert_smtp_pass"]=(request.form.get("alert_smtp_pass") or "").strip()
-        cfg["alert_smtp_host"]=(request.form.get("alert_smtp_host") or "smtp.gmail.com").strip()
-        cfg["alert_smtp_port"]=_clampi(request.form.get("alert_smtp_port",587),1,65535,587)
-        save_cfg(cfg)
-
-        # Acción: probar heartbeat (no bloquea)
-        if action=="heartbeat_test":
-            # encolado inmediato, el envío lo hace el thread dedicado
+        if action=="backup_import":
             try:
-                heartbeat_mgr.enqueue("manual_test")
-                hb_msg="Encolado (manual_test). Revisa el receptor / monitor."
+                uploaded = request.files.get("backup_file")
+                if not uploaded or not uploaded.filename:
+                    raise ValueError("Selecciona un archivo de respaldo.")
+                imported = _read_config_backup(uploaded.read(BACKUP_MAX_BYTES + 1), request.form.get("backup_passphrase") or "")
+                stamp = datetime.datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+                if os.path.exists(CFG_FILE):
+                    with open(CFG_FILE, "rb") as old, open(f"{CFG_FILE}.preimport-{stamp}.bak", "wb") as copy:
+                        copy.write(old.read())
+                save_cfg(imported)
+                cfg = load_cfg()
+                backup_msg="Respaldo importado. La configuración previa quedó guardada localmente como copia de recuperación."
             except Exception as e:
-                hb_msg=f"Error encolando: {e}"
-        elif action=="alert_test":
-            try:
-                _send_alert_email("[Comunito] Prueba de alerta",
-                    "Este es un correo de prueba enviado manualmente desde el portal ALPR.")
-                alert_msg="Correo de prueba enviado correctamente."
-            except Exception as e:
-                alert_msg=f"Error: {e}"
+                backup_msg=f"No se importó el respaldo: {e}"
         else:
-            hb_msg="Guardado."
+            # Guardar settings generales antes de crear un respaldo.
+            cfg["api_token"]=(request.form.get("api_token") or "").strip()
+            cfg["monitor_enabled"]=bool(request.form.get("monitor_enabled"))
+            cfg["monitor_url"]=(request.form.get("monitor_url") or "").strip()
+            cfg["monitor_period_min"]=_clampi(request.form.get("monitor_period_min", cfg.get("monitor_period_min",0)),0,1440,cfg.get("monitor_period_min",0))
+            cfg["alert_email_enabled"]=bool(request.form.get("alert_email_enabled"))
+            cfg["alert_email_to"]=(request.form.get("alert_email_to") or "").strip()
+            cfg["alert_email_to2"]=(request.form.get("alert_email_to2") or "").strip()
+            cfg["alert_smtp_user"]=(request.form.get("alert_smtp_user") or "").strip()
+            cfg["alert_smtp_pass"]=(request.form.get("alert_smtp_pass") or "").strip()
+            cfg["alert_smtp_host"]=(request.form.get("alert_smtp_host") or "smtp.gmail.com").strip()
+            cfg["alert_smtp_port"]=_clampi(request.form.get("alert_smtp_port",587),1,65535,587)
+            cfg["backup_drive_url"]=(request.form.get("backup_drive_url") or "").strip()
+            cfg["backup_drive_secret"]=(request.form.get("backup_drive_secret") or "").strip()
+            save_cfg(cfg)
+
+            if action=="backup_download":
+                try:
+                    filename, blob = _make_config_backup(cfg, request.form.get("backup_passphrase") or "")
+                    return send_file(BytesIO(blob), as_attachment=True, download_name=filename,
+                                     mimetype="application/json", max_age=0)
+                except Exception as e:
+                    backup_msg=f"No se creó el respaldo: {e}"
+            elif action=="backup_drive":
+                try:
+                    name = _upload_backup_to_drive(cfg, request.form.get("backup_passphrase") or "")
+                    backup_msg=f"Respaldo cifrado enviado a Google Drive: {name}"
+                except Exception as e:
+                    backup_msg=f"No se envió el respaldo: {e}"
+            elif action=="heartbeat_test":
+                try:
+                    heartbeat_mgr.enqueue("manual_test")
+                    hb_msg="Encolado (manual_test). Revisa el receptor / monitor."
+                except Exception as e:
+                    hb_msg=f"Error encolando: {e}"
+            elif action=="alert_test":
+                try:
+                    _send_alert_email("[Comunito] Prueba de alerta",
+                        "Este es un correo de prueba enviado manualmente desde el portal ALPR.")
+                    alert_msg="Correo de prueba enviado correctamente."
+                except Exception as e:
+                    alert_msg=f"Error: {e}"
+            else:
+                hb_msg="Guardado."
 
     def _fmt_ts(ts):
         try:
@@ -2632,7 +2778,6 @@ def settings_index():
             return "—"
 
     hb_msg = hb_msg
-    alert_msg = alert_msg if 'alert_msg' in dir() else ""
     return render_template_string(
         SETTINGS_INDEX,
         api_token=cfg.get("api_token",""),
@@ -2652,6 +2797,9 @@ def settings_index():
         alert_smtp_host=cfg.get("alert_smtp_host","smtp.gmail.com"),
         alert_smtp_port=cfg.get("alert_smtp_port",587),
         alert_msg=alert_msg,
+        backup_drive_url=cfg.get("backup_drive_url", ""),
+        backup_drive_secret=cfg.get("backup_drive_secret", ""),
+        backup_msg=backup_msg,
     )
 
 
@@ -3199,6 +3347,22 @@ def api_tag_wl_refresh():
     cam=_clampi(request.args.get("cam","1"),1,2,1)
     msg=download_tag_wl(cam)
     return jsonify({"ok":True,"message":msg})
+
+@app.route("/api/whitelist_status")
+def api_whitelist_status():
+    """Metadatos de actualización de whitelist, sin exponer su contenido."""
+    cameras={}
+    for cam in (1,2):
+        owners=float(_last_wl[cam-1].get("owners", 0.0) or 0.0)
+        visitors=float(_last_wl[cam-1].get("visitors", 0.0) or 0.0)
+        cameras[f"cam{cam}"]={
+            "owners_last_refresh_ts": owners or None,
+            "visitors_last_refresh_ts": visitors or None,
+            "last_refresh_ts": max(owners, visitors) or None,
+            "owners_refresh_min": int(cfg["cameras"][cam-1]["owners"].get("auto_refresh_min",0)),
+            "visitors_refresh_min": int(cfg["cameras"][cam-1]["visitors"].get("auto_refresh_min",0)),
+        }
+    return jsonify({"ok":True,"cameras":cameras})
 
 @app.route("/api/tag_event", methods=["POST"])
 def api_tag_event():

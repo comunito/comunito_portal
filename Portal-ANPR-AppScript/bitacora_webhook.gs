@@ -2,6 +2,11 @@
 const FOLDER_ID = '1cjciqwmqv7Y8a5_vaFZO1li1KjzRpjoh';
 const TIMEZONE = 'America/Mexico_City';
 
+// Respaldos cifrados enviados desde el portal. Configura estas propiedades en
+// Apps Script > Project Settings > Script properties; no las subas a Git:
+// COMUNITO_BACKUP_FOLDER_ID  (carpeta privada de Google Drive)
+// COMUNITO_BACKUP_SECRET     (secreto largo compartido con cada Pi)
+
 const COLUMNS = [
   { key: 'Principal-entrada',  label: 'Principal<br>Entrada'  },
   { key: 'Principal-salida',   label: 'Principal<br>Salida'   },
@@ -109,9 +114,40 @@ function splitBaseAndExtras_(obj) {
   return { orderedKeys, baseMap, extrasMap };
 }
 
+function configBackupResponse_(obj) {
+  const props = PropertiesService.getScriptProperties();
+  const expectedSecret = String(props.getProperty('COMUNITO_BACKUP_SECRET') || '');
+  const folderId = String(props.getProperty('COMUNITO_BACKUP_FOLDER_ID') || '');
+  if (!expectedSecret || !folderId) {
+    throw new Error('Falta configurar COMUNITO_BACKUP_SECRET o COMUNITO_BACKUP_FOLDER_ID.');
+  }
+  if (String(obj.secret || '') !== expectedSecret) {
+    throw new Error('Secreto de respaldo inválido.');
+  }
+  const filename = String(obj.filename || 'comunito-config.cbackup')
+    .replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180);
+  const encoded = String(obj.backup_b64 || '');
+  if (!encoded || encoded.length > 3 * 1024 * 1024) {
+    throw new Error('Respaldo vacío o demasiado grande.');
+  }
+  const bytes = Utilities.base64Decode(encoded);
+  const folder = DriveApp.getFolderById(folderId);
+  const file = folder.createFile(Utilities.newBlob(bytes, 'application/json', filename));
+  file.setDescription('Respaldo cifrado de configuración Comunito.');
+  // La carpeta conserva permisos privados: nunca se habilita "cualquiera con enlace".
+  return {ok:true, file_name:file.getName(), file_id:file.getId()};
+}
+
 /**** doPost (IDÉNTICO AL ORIGINAL PARA NO ROMPER LA HOJA) ****/
 function doPost(e) {
   try {
+    if (e.postData && e.postData.type && e.postData.type.toLowerCase().indexOf('application/json') !== -1) {
+      const probe = JSON.parse(e.postData.contents || '{}');
+      if (probe.action === 'config_backup') {
+        return ContentService.createTextOutput(JSON.stringify(configBackupResponse_(probe)))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
     const ss = SpreadsheetApp.getActive();
     const sh = ss.getSheets()[0]; // Usa la primera hoja automáticamente (Hoja 1)
     let file = null, obj = {}, orderedKeys = [];
