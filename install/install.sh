@@ -75,6 +75,8 @@ sudo systemctl restart dnsmasq
 echo "==> 6) Instalar Tailscale"
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo systemctl enable tailscaled --now || true
+sudo install -d -m 0755 /etc/systemd/system/tailscaled.service.d
+sudo cp "$APP_DIR/systemd/tailscaled-recovery.conf" /etc/systemd/system/tailscaled.service.d/comunito-recovery.conf
 echo "==> Tailscale instalado. Después ejecuta: sudo tailscale up"
 
 echo "==> 7) Instalar systemd service"
@@ -83,15 +85,18 @@ sudo sed -i "s|^User=.*|User=$ME|g" "$SVC"
 sudo sed -i "s|/home/pi|/home/$ME|g" "$SVC"
 
 echo "==> 8) Habilitar servicio"
+sudo install -m 0755 "$APP_DIR/install/net_watchdog.sh" /usr/local/sbin/comunito-network-watchdog
+sudo cp "$APP_DIR/systemd/comunito-network-watchdog.service" /etc/systemd/system/
+sudo cp "$APP_DIR/systemd/comunito-network-watchdog.timer" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable comunito-portal.service --now
+sudo systemctl enable --now comunito-network-watchdog.timer
 
-echo "==> 9) Proteger tarjeta SD (tmpfs en /var/log)"
-if ! grep -q "tmpfs /var/log" /etc/fstab; then
-  echo "tmpfs   /var/log    tmpfs   defaults,noatime,nosuid,mode=0755,size=50m    0 0" | sudo tee -a /etc/fstab
-  sudo mount -a || true
-  sudo systemctl restart rsyslog || true
-fi
+echo "==> 9) Conservar diagnósticos de forma acotada"
+sudo install -d -m 2755 -o root -g systemd-journal /var/log/journal
+sudo install -d -m 0755 /etc/systemd/journald.conf.d
+printf '%s\n' '[Journal]' 'Storage=persistent' 'SystemMaxUse=200M' | sudo tee /etc/systemd/journald.conf.d/comunito.conf >/dev/null
+sudo systemctl restart systemd-journald
 
 IP_NOW="$(hostname -I | awk '{print $1}')"
 echo

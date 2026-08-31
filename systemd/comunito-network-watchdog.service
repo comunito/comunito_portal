@@ -1,0 +1,13 @@
+[Unit]
+Description=Comunito network and Tailscale recovery check
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+StateDirectory=comunito
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=30
+ExecStart=/usr/local/sbin/comunito-network-watchdog
