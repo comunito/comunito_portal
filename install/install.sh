@@ -52,6 +52,9 @@ python3 -m venv "$VENV"
 source "$VENV/bin/activate"
 python -m pip install --upgrade pip wheel setuptools
 pip install -r "$APP_DIR/requirements.txt"
+# fast-alpr declara OpenCV headless como dependencia indirecta. El portal usa
+# deliberadamente el OpenCV del sistema, compilado con el stack GStreamer.
+pip uninstall -y opencv-python-headless opencv-python >/dev/null 2>&1 || true
 
 echo "==> 3.1) Validar fast_alpr"
 python - <<'PYCHK'
