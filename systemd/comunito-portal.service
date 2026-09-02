@@ -15,6 +15,12 @@ ExecStart=/home/pi/comunito_portal/comunito-venv/bin/python -u portal_alpr_full.
 Restart=always
 RestartSec=5
 
+# Reservar capacidad para red, Tailscale y el sistema aun con ALPR a máxima carga.
+# El Pi 5 tiene 4 núcleos: el portal puede usar hasta 3.5 y deja margen al sistema.
+CPUQuota=350%
+Nice=5
+TasksMax=256
+
 # Watchdog: systemd mata y reinicia si el proceso no pinga en 120s
 WatchdogSec=120
 NotifyAccess=all

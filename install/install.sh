@@ -20,6 +20,21 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 sudo systemctl enable NetworkManager --now || true
 
+echo "==> 1.1) Habilitar aislamiento de memoria para servicios"
+# En algunos kernels de Raspberry Pi el controlador de memoria no se habilita
+# por defecto. Sin él, MemoryMax no puede contener un proceso desbordado.
+BOOT_CMDLINE="/boot/firmware/cmdline.txt"
+if [ ! -f "$BOOT_CMDLINE" ]; then
+  BOOT_CMDLINE="/boot/cmdline.txt"
+fi
+if [ -f "$BOOT_CMDLINE" ]; then
+  sudo sed -i 's/cgroup_disable=memory//g' "$BOOT_CMDLINE"
+  if ! grep -qw 'cgroup_enable=memory' "$BOOT_CMDLINE"; then
+    sudo sed -i 's/$/ cgroup_enable=memory cgroup_memory=1/' "$BOOT_CMDLINE"
+    echo "==> El aislamiento de memoria se activará tras el próximo reinicio."
+  fi
+fi
+
 echo "==> 2) Clonar/actualizar repo"
 if [ -d "$APP_DIR/.git" ]; then
   cd "$APP_DIR"
