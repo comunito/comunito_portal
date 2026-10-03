@@ -31,6 +31,16 @@ MemorySwapMax=0
 OOMPolicy=kill
 OOMScoreAdjust=500
 
+# Endurecimiento: el portal no necesita modificar el sistema ni elevar privilegios.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+LockPersonality=true
+RestrictSUIDSGID=true
+
 # TimeoutStartSec=120 permite que ALPR model loading tome hasta 2min
 # Si tarda más, systemd mata y reinicia (ALPR retry loop lo recupera)
 TimeoutStartSec=120

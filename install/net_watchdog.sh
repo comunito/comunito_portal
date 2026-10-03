@@ -4,7 +4,8 @@
 
 set -u
 
-STATE_DIR="/var/lib/comunito"
+# Estado efímero: nunca convertir una comprobación de red en escrituras a la SD.
+STATE_DIR="/run/comunito"
 LOG="$STATE_DIR/network-watchdog.log"
 LOCK="$STATE_DIR/network-watchdog.lock"
 MAX_LOG_BYTES=1048576

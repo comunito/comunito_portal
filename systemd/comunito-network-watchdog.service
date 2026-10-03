@@ -5,7 +5,9 @@ Wants=network-online.target tailscaled.service
 
 [Service]
 Type=oneshot
-StateDirectory=comunito
+RuntimeDirectory=comunito
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 UMask=0077
 Nice=10
 IOSchedulingClass=idle

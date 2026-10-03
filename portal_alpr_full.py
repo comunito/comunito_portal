@@ -1,6 +1,6 @@
 from __future__ import annotations
 from flask import Flask, jsonify, render_template_string, Response, request, redirect, url_for, send_file
-import cv2, threading, time, os, json, csv, requests, subprocess, re, datetime, base64, queue, glob
+import cv2, threading, time, os, json, csv, requests, subprocess, re, datetime, base64, queue, glob, tempfile
 import numpy as np
 from collections import OrderedDict
 from copy import deepcopy
@@ -356,15 +356,43 @@ def load_cfg():
 # Ruta de backup en la partición FAT32 /boot — sobrevive a reinstalaciones de SO
 _BOOT_BACKUP = "/boot/firmware/comunito_config_backup.json"
 
-def save_cfg(c):
-    with open(CFG_FILE,"w") as f:
-        json.dump(c, f, indent=2)
-    # Backup automático en /boot (FAT32) para reinstalación sin pérdida de config
+def _atomic_json_write(path: str, data: dict):
+    """Escribe configuración completa o conserva la versión anterior.
+
+    Nunca se trunca el archivo final antes de tener una copia sincronizada. Esto
+    protege los settings frente a un corte eléctrico durante una edición.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, temporary = tempfile.mkstemp(prefix=".comunito-", suffix=".tmp", dir=directory)
     try:
-        with open(_BOOT_BACKUP, "w") as f:
-            json.dump(c, f, indent=2)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        # Sincroniza el cambio de nombre en el directorio cuando el FS lo permite.
+        try:
+            directory_fd = os.open(directory, os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
     except Exception:
-        pass  # /boot puede ser read-only en algunos setups
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+def save_cfg(c):
+    # Primero deja una copia de recuperación separada de la partición raíz.
+    try:
+        _atomic_json_write(_BOOT_BACKUP, c)
+    except Exception:
+        pass  # /boot puede estar ausente o en solo lectura
+    _atomic_json_write(CFG_FILE, c)
 
 def _load_cfg_with_fallback():
     """Carga config principal; si falla, intenta el backup en /boot."""
@@ -385,8 +413,7 @@ def _load_cfg_with_fallback():
                 print("[CFG] config principal ausente/corrupta — restaurada desde backup /boot")
                 # Restaurar también la copia principal
                 try:
-                    with open(CFG_FILE,"w") as f:
-                        json.dump(d, f, indent=2)
+                    _atomic_json_write(CFG_FILE, d)
                 except Exception:
                     pass
                 return d

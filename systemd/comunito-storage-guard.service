@@ -1,0 +1,10 @@
+[Unit]
+Description=Comunito safe storage health guard
+After=local-fs.target comunito-portal.service
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=20
+ExecStart=/usr/local/sbin/comunito-storage-guard

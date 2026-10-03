@@ -106,14 +106,22 @@ echo "==> 8) Habilitar servicio"
 sudo install -m 0755 "$APP_DIR/install/net_watchdog.sh" /usr/local/sbin/comunito-network-watchdog
 sudo cp "$APP_DIR/systemd/comunito-network-watchdog.service" /etc/systemd/system/
 sudo cp "$APP_DIR/systemd/comunito-network-watchdog.timer" /etc/systemd/system/
+sudo install -m 0755 "$APP_DIR/install/storage_guard.sh" /usr/local/sbin/comunito-storage-guard
+sudo cp "$APP_DIR/systemd/comunito-storage-guard.service" /etc/systemd/system/
+sudo cp "$APP_DIR/systemd/comunito-storage-guard.timer" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable comunito-portal.service --now
 sudo systemctl enable --now comunito-network-watchdog.timer
+sudo systemctl enable --now comunito-storage-guard.timer
 
-echo "==> 9) Conservar diagnósticos de forma acotada"
-sudo install -d -m 2755 -o root -g systemd-journal /var/log/journal
+echo "==> 9) Reducir escrituras persistentes y acotar diagnósticos"
 sudo install -d -m 0755 /etc/systemd/journald.conf.d
-printf '%s\n' '[Journal]' 'Storage=persistent' 'SystemMaxUse=200M' | sudo tee /etc/systemd/journald.conf.d/comunito.conf >/dev/null
+sudo install -m 0644 "$APP_DIR/systemd/journald-comunito.conf" /etc/systemd/journald.conf.d/comunito.conf
+sudo install -d -m 0755 /etc/systemd/coredump.conf.d
+sudo install -m 0644 "$APP_DIR/systemd/coredump-comunito.conf" /etc/systemd/coredump.conf.d/comunito.conf
+# No usar la SD como swap; el servicio ALPR ya tiene límite de memoria propio.
+sudo swapoff -a 2>/dev/null || true
+sudo systemctl disable --now dphys-swapfile 2>/dev/null || true
 sudo systemctl restart systemd-journald
 
 IP_NOW="$(hostname -I | awk '{print $1}')"

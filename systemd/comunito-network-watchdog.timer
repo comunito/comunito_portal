@@ -3,8 +3,8 @@ Description=Run conservative Comunito network and Tailscale health check
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
-Persistent=true
+OnUnitActiveSec=10min
+Persistent=false
 
 [Install]
 WantedBy=timers.target

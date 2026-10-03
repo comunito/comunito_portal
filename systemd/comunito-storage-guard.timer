@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Comunito storage guard without persistent timer state
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=15min
+Persistent=false
+
+[Install]
+WantedBy=timers.target
