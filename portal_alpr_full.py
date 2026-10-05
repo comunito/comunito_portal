@@ -155,7 +155,9 @@ WL_DEF = {
 MOTION_DEF = {
     "enabled": True,
     "pixel_change_pct": 2.0,
-    "intensity_delta": 25,
+    # Umbral probado en casetanavarra1: reduce ruido de imagen sin afectar
+    # la detección de vehículos y evita mantener ALPR ocupado continuamente.
+    "intensity_delta": 40,
     "autobase_every_min": 10,
     "autobase_samples": 3,
     "autobase_interval_s": 1.0,
@@ -1458,7 +1460,7 @@ def _motion_ratio(cam:int, gray)->float:
     if h<8 or w<8: return 0.0
     a=gray[:h,:w]; b=base[:h,:w]
     d=cv2.absdiff(a,b)
-    thr=int(cfg["cameras"][cam-1]["motion"].get("intensity_delta",25))
+    thr=int(cfg["cameras"][cam-1]["motion"].get("intensity_delta",40))
     _,bw=cv2.threshold(d, thr, 255, cv2.THRESH_BINARY)
     changed=int(np.count_nonzero(bw)); total=bw.size
     return (100.0*changed/float(total))
@@ -2928,7 +2930,7 @@ def settings_cam(cam:int):
         m["enabled"]=bool(request.form.get("motion_enabled"))
         try: m["pixel_change_pct"]=float(request.form.get("motion_pixel_change_pct", m.get("pixel_change_pct",2.0)))
         except: pass
-        m["intensity_delta"]=_clampi(request.form.get("motion_intensity_delta", m.get("intensity_delta",25)), 1, 255, m.get("intensity_delta",25))
+        m["intensity_delta"]=_clampi(request.form.get("motion_intensity_delta", m.get("intensity_delta",40)), 1, 255, m.get("intensity_delta",40))
         m["autobase_every_min"]=_clampi(request.form.get("motion_autobase_every_min", m.get("autobase_every_min",10)),1,1440,m.get("autobase_every_min",10))
         m["autobase_samples"]=_clampi(request.form.get("motion_autobase_samples", m.get("autobase_samples",3)),1,5,m.get("autobase_samples",3))
         try: m["autobase_interval_s"]=max(0.2, float(request.form.get("motion_autobase_interval_s", m.get("autobase_interval_s",1.0))))
