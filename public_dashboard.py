@@ -15,6 +15,7 @@ from flask import Flask, jsonify, render_template_string
 
 app = Flask(__name__)
 POLL_SECONDS = max(1, int(os.getenv("POLL_SECONDS", "2")))
+DUPLICATE_WINDOW_SECONDS = 10.0
 NODES = {
     "Real Navarra acceso 1": os.getenv("PRIMARY_URL", "http://127.0.0.1:5000"),
     "Real Navarra acceso 2": os.getenv("SECONDARY_URL", "http://100.112.144.53:5000"),
@@ -27,12 +28,25 @@ history = []
 last_seen = {}
 
 
+def compact_history(items: list) -> list:
+    kept = []
+    recent = {}
+    for item in sorted(items, key=lambda value: value.get("ts", 0), reverse=True):
+        key = (item.get("source"), item.get("cam"), item.get("plate"))
+        ts = float(item.get("ts") or 0)
+        if key in recent and (recent[key] - ts) <= DUPLICATE_WINDOW_SECONDS:
+            continue
+        recent[key] = ts
+        kept.append(item)
+    return kept
+
+
 def load_history() -> None:
     global history
     try:
         with history_path.open(encoding="utf-8") as fh:
             loaded = json.load(fh)
-        history = loaded[:200] if isinstance(loaded, list) else []
+        history = compact_history(loaded[:200]) if isinstance(loaded, list) else []
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         history = []
 
@@ -41,7 +55,7 @@ def save_history() -> None:
     history_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = history_path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(history[:200], fh, ensure_ascii=False)
+        json.dump(compact_history(history[:200]), fh, ensure_ascii=False)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, history_path)
@@ -57,6 +71,15 @@ def remember_readings(nodes: dict) -> None:
                 key = f"{name}|cam{cam.get('cam')}"
                 previous = last_seen.get(key, (0.0, ""))
                 if plate and plate != "Sin lectura" and (ts > previous[0] or plate != previous[1]):
+                    duplicate = any(
+                        item.get("source") == name and item.get("cam") == cam.get("cam")
+                        and item.get("plate") == plate
+                        and 0 <= (ts - float(item.get("ts") or 0)) <= DUPLICATE_WINDOW_SECONDS
+                        for item in history
+                    )
+                    last_seen[key] = (ts, plate)
+                    if duplicate:
+                        continue
                     history.insert(0, {
                         "ts": ts or time.time(), "source": name, "cam": cam.get("cam"),
                         "plate": plate, "confidence": cam.get("confidence"),
@@ -67,7 +90,6 @@ def remember_readings(nodes: dict) -> None:
                         oldest = min(camera_history, key=lambda item: item.get("ts", 0))
                         history.remove(oldest)
                     history.sort(key=lambda item: item.get("ts", 0), reverse=True)
-                    last_seen[key] = (ts, plate)
                     changed = True
         if changed:
             save_history()
