@@ -193,13 +193,13 @@ footer{max-width:1180px;margin:20px auto;padding:0 18px;color:#647180;font-size:
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function time(ts){return ts?new Date(ts*1000).toLocaleString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'Pendiente';}
 let latestData=null;
+const cols=[['Real Navarra acceso 1|1','Acceso 1 · Entrada'],['Real Navarra acceso 1|2','Acceso 1 · Salida'],['Real Navarra acceso 2|1','Acceso 2 · Entrada'],['Real Navarra acceso 2|2','Acceso 2 · Salida']];
 function render(d){latestData=d;document.querySelector('#app').innerHTML=d.nodes.map(n=>`<section class="card">
 <div class="title"><h2>${esc(n.name)}</h2><span class="${n.online?'ok':'bad'}"><i class="dot ${n.online?'on':''}"></i>${n.online?'En línea':'Sin conexión'}</span></div>
 <div class="metrics"><div class="metric"><span class="muted">Temperatura</span><b>${n.temperature_c==null?'—':esc(Number(n.temperature_c).toFixed(1))}°C</b></div><div class="metric"><span class="muted">CPU</span><b>${n.cpu_pct==null?'—':esc(Number(n.cpu_pct).toFixed(0))}%</b></div><div class="metric"><span class="muted">Pluma</span><b>${n.gate_connected?'Conectada':'—'}</b></div></div>
 ${(n.cameras||[]).map(c=>`<div class="cam"><div class="muted">Cam ${c.cam} · ${c.connected?'Conectada':'Sin conexión'} ${c.motion?'· Movimiento':''}</div><div class="plate">${esc(c.plate)}</div><div class="small">${c.authorized?'Autorizada':'Sin autorización'} · Confianza ${c.confidence==null?'—':esc((Number(c.confidence)*100).toFixed(0))}% · ${c.detected_ts?'Leída '+time(c.detected_ts):'Sin lectura registrada'}</div></div>`).join('')}
 <div class="wl"><b>Whitelist</b><br>${(n.whitelist||[]).map(w=>`Cam ${w.cam}: última actualización ${time(w.last_refresh_ts)}${w.refresh_min?' · cada '+w.refresh_min+' min':''}`).join('<br>')}</div>
 <div class="small">Última consulta: ${time(n.updated_at)}${n.error?' · '+esc(n.error):''}</div></section>`).join('');
-const cols=[['Real Navarra acceso 1|1','Acceso 1 · Entrada'],['Real Navarra acceso 1|2','Acceso 1 · Salida'],['Real Navarra acceso 2|1','Acceso 2 · Entrada'],['Real Navarra acceso 2|2','Acceso 2 · Salida']];
 renderHistory(d.history||[]);
 }
 function renderHistory(all){const query=(document.querySelector('#plateSearch')?.value||'').trim().toUpperCase();const filtered=query?all.filter(e=>String(e.plate||'').toUpperCase().includes(query)):all;document.querySelector('#searchInfo').textContent=query?`${filtered.length} coincidencia(s) en el historial local`:' ';document.querySelector('#history').innerHTML=cols.map(([key,label])=>{const items=filtered.filter(e=>key===e.source+'|'+e.cam).slice(0,50);return `<div class="history-col"><h3>${label}</h3><ul>${items.map(e=>`<li><b>${esc(e.plate)}</b><time>${time(e.ts)}</time></li>`).join('')||'<li class="muted">Sin coincidencias</li>'}</ul></div>`}).join('')}
