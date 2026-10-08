@@ -46,7 +46,10 @@ def load_history() -> None:
     try:
         with history_path.open(encoding="utf-8") as fh:
             loaded = json.load(fh)
-        history = compact_history(loaded[:200]) if isinstance(loaded, list) else []
+        original = loaded[:200] if isinstance(loaded, list) else []
+        history = compact_history(original)
+        if len(history) != len(original):
+            save_history()
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         history = []
 
