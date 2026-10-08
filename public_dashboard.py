@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 from flask import Flask, jsonify, render_template_string
@@ -20,6 +21,48 @@ NODES = {
 }
 cache_lock = threading.Lock()
 cache = {name: {"name": name, "online": False, "error": "Inicializando"} for name in NODES}
+history_lock = threading.Lock()
+history_path = Path(os.getenv("STATE_FILE", "/var/lib/comunito-public-dashboard/history.json"))
+history = []
+last_seen = {}
+
+
+def load_history() -> None:
+    global history
+    try:
+        with history_path.open(encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        history = loaded[:50] if isinstance(loaded, list) else []
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        history = []
+
+
+def save_history() -> None:
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = history_path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        json.dump(history[:50], fh, ensure_ascii=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, history_path)
+
+
+def remember_readings(nodes: dict) -> None:
+    changed = False
+    with history_lock:
+        for name, node in nodes.items():
+            for cam in node.get("cameras", []):
+                plate = (cam.get("plate") or "").strip()
+                ts = float(cam.get("detected_ts") or 0)
+                key = f"{name}|cam{cam.get('cam')}"
+                previous = last_seen.get(key, (0.0, ""))
+                if plate and plate != "Sin lectura" and (ts > previous[0] or plate != previous[1]):
+                    history.insert(0, {"ts": ts or time.time(), "source": name, "cam": cam.get("cam"), "plate": plate})
+                    history[:] = history[:50]
+                    last_seen[key] = (ts, plate)
+                    changed = True
+        if changed:
+            save_history()
 
 
 def get_json(base: str, path: str) -> dict:
@@ -49,6 +92,7 @@ def public_node_status(name: str, base: str) -> dict:
                 "connected": f"CAM{cam}:OK" in result.get("health", ""),
                 "plate": status.get("plate") or "Sin lectura",
                 "confidence": status.get("conf"),
+                "detected_ts": status.get("ts"),
                 "authorized": bool(status.get("auth")),
                 "motion": bool(motion_cam.get("active")),
                 "last_sent": motion_cam.get("queue", {}).get("sent", 0),
@@ -72,6 +116,7 @@ def poll_loop() -> None:
         fresh = {name: public_node_status(name, base) for name, base in NODES.items()}
         with cache_lock:
             cache = fresh
+        remember_readings(fresh)
         time.sleep(POLL_SECONDS)
 
 
@@ -79,7 +124,9 @@ def poll_loop() -> None:
 def public_status():
     with cache_lock:
         nodes = list(cache.values())
-    return jsonify({"updated_at": time.time(), "nodes": nodes})
+    with history_lock:
+        recent = list(history[:50])
+    return jsonify({"updated_at": time.time(), "nodes": nodes, "history": recent})
 
 
 @app.get("/healthz")
@@ -98,9 +145,10 @@ main{max-width:1180px;margin:24px auto;padding:0 18px}.grid{display:grid;grid-te
 .title{display:flex;justify-content:space-between;gap:10px;align-items:center}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#c43d3d;margin-right:7px}.on{background:#218739}
 .muted{color:#647180;font-size:13px}.metrics{display:flex;gap:18px;flex-wrap:wrap;margin:16px 0}.metric b{display:block;font-size:20px}.cam{border-top:1px solid #e8edf1;padding:13px 0}.cam:first-of-type{border-top:0}
 .plate{font-size:25px;font-weight:750;letter-spacing:.06em}.ok{color:#218739}.bad{color:#b42318}.small{font-size:12px;color:#647180}.wl{margin-top:14px;background:#f7f9fa;border-radius:9px;padding:10px;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:10px 8px;border-top:1px solid #e8edf1;text-align:left;white-space:nowrap}th{font-size:12px;color:#647180;background:#f7f9fa}
 footer{max-width:1180px;margin:20px auto;padding:0 18px;color:#647180;font-size:12px}
 </style></head><body><header><h1>Comunito · Estado de casetas</h1><div>Lecturas automáticas y estado operativo · actualización continua</div></header>
-<main><div id="app" class="grid"><div class="card">Cargando estado…</div></div></main><footer>Vista pública de solo lectura. Los portales de administración permanecen protegidos.</footer>
+<main><div id="app" class="grid"><div class="card">Cargando estado…</div></div><section class="card" style="margin-top:18px"><div class="title"><h2>Últimas 50 lecturas</h2><span class="muted">Historial por cámara</span></div><div style="overflow:auto"><table><thead><tr><th>Hora</th><th>Acceso 1 · Entrada</th><th>Acceso 1 · Salida</th><th>Acceso 2 · Entrada</th><th>Acceso 2 · Salida</th></tr></thead><tbody id="history"><tr><td colspan="5" class="muted">Cargando…</td></tr></tbody></table></div></section></main><footer>Vista pública de solo lectura. Los portales de administración permanecen protegidos.</footer>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function time(ts){return ts?new Date(ts*1000).toLocaleString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'Pendiente';}
@@ -109,7 +157,10 @@ function render(d){document.querySelector('#app').innerHTML=d.nodes.map(n=>`<sec
 <div class="metrics"><div class="metric"><span class="muted">Temperatura</span><b>${n.temperature_c==null?'—':esc(Number(n.temperature_c).toFixed(1))}°C</b></div><div class="metric"><span class="muted">CPU</span><b>${n.cpu_pct==null?'—':esc(Number(n.cpu_pct).toFixed(0))}%</b></div><div class="metric"><span class="muted">Pluma</span><b>${n.gate_connected?'Conectada':'—'}</b></div></div>
 ${(n.cameras||[]).map(c=>`<div class="cam"><div class="muted">Cam ${c.cam} · ${c.connected?'Conectada':'Sin conexión'} ${c.motion?'· Movimiento':''}</div><div class="plate">${esc(c.plate)}</div><div class="small">${c.authorized?'Autorizada':'Sin autorización'} · Confianza ${c.confidence==null?'—':esc((Number(c.confidence)*100).toFixed(0))}%</div></div>`).join('')}
 <div class="wl"><b>Whitelist</b><br>${(n.whitelist||[]).map(w=>`Cam ${w.cam}: última actualización ${time(w.last_refresh_ts)}${w.refresh_min?' · cada '+w.refresh_min+' min':''}`).join('<br>')}</div>
-<div class="small">Última consulta: ${time(n.updated_at)}${n.error?' · '+esc(n.error):''}</div></section>`).join('');}
+<div class="small">Última consulta: ${time(n.updated_at)}${n.error?' · '+esc(n.error):''}</div></section>`).join('');
+const cols=['Real Navarra acceso 1|1','Real Navarra acceso 1|2','Real Navarra acceso 2|1','Real Navarra acceso 2|2'];
+document.querySelector('#history').innerHTML=(d.history||[]).map(e=>`<tr><td>${time(e.ts)}</td>${cols.map(k=>`<td>${k===e.source+'|'+e.cam?'<b>'+esc(e.plate)+'</b>':'—'}</td>`).join('')}</tr>`).join('')||'<tr><td colspan="5" class="muted">Aún no hay lecturas registradas.</td></tr>';
+}
 async function refresh(){try{const r=await fetch('/api/public-status',{cache:'no-store'});render(await r.json())}catch(e){document.querySelector('#app').innerHTML='<div class="card">No se pudo consultar el estado.</div>'}}
 refresh();setInterval(refresh,2000);
 </script></body></html>"""
@@ -120,6 +171,7 @@ def index():
     return render_template_string(PAGE)
 
 
+load_history()
 threading.Thread(target=poll_loop, daemon=True, name="status-poller").start()
 
 if __name__ == "__main__":
