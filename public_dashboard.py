@@ -32,7 +32,7 @@ def load_history() -> None:
     try:
         with history_path.open(encoding="utf-8") as fh:
             loaded = json.load(fh)
-        history = loaded[:50] if isinstance(loaded, list) else []
+        history = loaded[:200] if isinstance(loaded, list) else []
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         history = []
 
@@ -41,7 +41,7 @@ def save_history() -> None:
     history_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = history_path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(history[:50], fh, ensure_ascii=False)
+        json.dump(history[:200], fh, ensure_ascii=False)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, history_path)
@@ -62,7 +62,11 @@ def remember_readings(nodes: dict) -> None:
                         "plate": plate, "confidence": cam.get("confidence"),
                         "authorized": bool(cam.get("authorized")),
                     })
-                    history[:] = history[:50]
+                    camera_history = [item for item in history if item.get("source") == name and item.get("cam") == cam]
+                    if len(camera_history) > 50:
+                        oldest = min(camera_history, key=lambda item: item.get("ts", 0))
+                        history.remove(oldest)
+                    history.sort(key=lambda item: item.get("ts", 0), reverse=True)
                     last_seen[key] = (ts, plate)
                     changed = True
         if changed:
@@ -134,7 +138,7 @@ def public_status():
     with cache_lock:
         nodes = list(cache.values())
     with history_lock:
-        recent = list(history[:50])
+        recent = list(history[:200])
     return jsonify({"updated_at": time.time(), "nodes": nodes, "history": recent})
 
 
@@ -150,14 +154,15 @@ PAGE = """<!doctype html>
 body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#f4f6f8;color:#18202a}
 header{background:#17212b;color:#fff;padding:22px 5vw}h1{margin:0 0 5px;font-size:clamp(22px,4vw,34px)}
 main{max-width:1180px;margin:24px auto;padding:0 18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}
-.card{background:#fff;border:1px solid #dce2e8;border-radius:14px;padding:18px;box-shadow:0 2px 10px #1220330d}
+.card{background:#fff;border:1px solid #dce2e8;border-radius:12px;padding:14px;box-shadow:0 2px 8px #1220330d}
 .title{display:flex;justify-content:space-between;gap:10px;align-items:center}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#c43d3d;margin-right:7px}.on{background:#218739}
-.muted{color:#647180;font-size:13px}.metrics{display:flex;gap:18px;flex-wrap:wrap;margin:16px 0}.metric b{display:block;font-size:20px}.cam{border-top:1px solid #e8edf1;padding:13px 0}.cam:first-of-type{border-top:0}
+.muted{color:#647180;font-size:13px}.metrics{display:flex;gap:16px;flex-wrap:wrap;margin:10px 0}.metric b{display:block;font-size:18px}.cam{border-top:1px solid #e8edf1;padding:10px 0}.cam:first-of-type{border-top:0}
 .plate{font-size:25px;font-weight:750;letter-spacing:.06em}.ok{color:#218739}.bad{color:#b42318}.small{font-size:12px;color:#647180}.wl{margin-top:14px;background:#f7f9fa;border-radius:9px;padding:10px;font-size:13px}
-table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:10px 8px;border-top:1px solid #e8edf1;text-align:left;white-space:nowrap}th{font-size:12px;color:#647180;background:#f7f9fa}
+.history-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.history-col{background:#f7f9fa;border-radius:9px;padding:10px;min-width:0}.history-col h3{font-size:13px;margin:0 0 7px;color:#536273}.history-col ul{list-style:none;margin:0;padding:0}.history-col li{display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-top:1px solid #e2e8ed;font-size:14px}.history-col li:first-child{border-top:0}.history-col time{color:#647180;font-size:12px;white-space:nowrap}
 footer{max-width:1180px;margin:20px auto;padding:0 18px;color:#647180;font-size:12px}
+@media(max-width:700px){header{padding:14px 18px}header h1{font-size:22px}header div{font-size:12px}main{margin:12px auto;padding:0 10px}.grid{grid-template-columns:1fr;gap:10px}.title h2{font-size:18px;margin:4px 0}.plate{font-size:22px}.history-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.history-col{padding:8px}.history-col h3{font-size:12px;line-height:1.2}.history-col li{display:block;font-size:14px}.history-col time{display:block;margin-top:2px}.card{padding:11px}}
 </style></head><body><header><h1>Comunito · Estado de casetas</h1><div>Lecturas automáticas y estado operativo · actualización continua</div></header>
-<main><div id="app" class="grid"><div class="card">Cargando estado…</div></div><section class="card" style="margin-top:18px"><div class="title"><h2>Últimas 50 lecturas</h2><span class="muted">Historial por cámara</span></div><div style="overflow:auto"><table><thead><tr><th>Hora</th><th>Acceso 1 · Entrada</th><th>Acceso 1 · Salida</th><th>Acceso 2 · Entrada</th><th>Acceso 2 · Salida</th></tr></thead><tbody id="history"><tr><td colspan="5" class="muted">Cargando…</td></tr></tbody></table></div></section></main><footer>Vista pública de solo lectura. Los portales de administración permanecen protegidos.</footer>
+<main><div id="app" class="grid"><div class="card">Cargando estado…</div></div><section class="card" style="margin-top:12px"><div class="title"><h2>Últimas lecturas</h2><span class="muted">50 por cámara</span></div><div id="history" class="history-grid" style="margin-top:10px"></div></section></main><footer>Vista pública de solo lectura. Los portales de administración permanecen protegidos.</footer>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function time(ts){return ts?new Date(ts*1000).toLocaleString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'Pendiente';}
@@ -167,8 +172,8 @@ function render(d){document.querySelector('#app').innerHTML=d.nodes.map(n=>`<sec
 ${(n.cameras||[]).map(c=>`<div class="cam"><div class="muted">Cam ${c.cam} · ${c.connected?'Conectada':'Sin conexión'} ${c.motion?'· Movimiento':''}</div><div class="plate">${esc(c.plate)}</div><div class="small">${c.authorized?'Autorizada':'Sin autorización'} · Confianza ${c.confidence==null?'—':esc((Number(c.confidence)*100).toFixed(0))}% · ${c.detected_ts?'Leída '+time(c.detected_ts):'Sin lectura registrada'}</div></div>`).join('')}
 <div class="wl"><b>Whitelist</b><br>${(n.whitelist||[]).map(w=>`Cam ${w.cam}: última actualización ${time(w.last_refresh_ts)}${w.refresh_min?' · cada '+w.refresh_min+' min':''}`).join('<br>')}</div>
 <div class="small">Última consulta: ${time(n.updated_at)}${n.error?' · '+esc(n.error):''}</div></section>`).join('');
-const cols=['Real Navarra acceso 1|1','Real Navarra acceso 1|2','Real Navarra acceso 2|1','Real Navarra acceso 2|2'];
-document.querySelector('#history').innerHTML=(d.history||[]).map(e=>`<tr><td>${time(e.ts)}</td>${cols.map(k=>`<td>${k===e.source+'|'+e.cam?'<b>'+esc(e.plate)+'</b>':'—'}</td>`).join('')}</tr>`).join('')||'<tr><td colspan="5" class="muted">Aún no hay lecturas registradas.</td></tr>';
+const cols=[['Real Navarra acceso 1|1','Acceso 1 · Entrada'],['Real Navarra acceso 1|2','Acceso 1 · Salida'],['Real Navarra acceso 2|1','Acceso 2 · Entrada'],['Real Navarra acceso 2|2','Acceso 2 · Salida']];
+document.querySelector('#history').innerHTML=cols.map(([key,label])=>{const items=(d.history||[]).filter(e=>key===e.source+'|'+e.cam).slice(0,50);return `<div class="history-col"><h3>${label}</h3><ul>${items.map(e=>`<li><b>${esc(e.plate)}</b><time>${time(e.ts)}</time></li>`).join('')||'<li class="muted">Sin lecturas</li>'}</ul></div>`}).join('');
 }
 async function refresh(){try{const r=await fetch('/api/public-status',{cache:'no-store'});render(await r.json())}catch(e){document.querySelector('#app').innerHTML='<div class="card">No se pudo consultar el estado.</div>'}}
 refresh();setInterval(refresh,2000);
