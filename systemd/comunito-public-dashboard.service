@@ -1,0 +1,24 @@
+[Unit]
+Description=Comunito read-only public status dashboard
+After=network-online.target comunito-portal.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=navarracaseta1
+WorkingDirectory=/home/navarracaseta1/comunito_portal
+Environment=PORT=5100
+Environment=PRIMARY_URL=http://127.0.0.1:5000
+Environment=SECONDARY_URL=http://100.112.144.53:5000
+ExecStart=/home/navarracaseta1/comunito_portal/comunito-venv/bin/python /home/navarracaseta1/comunito_portal/public_dashboard.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/run
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
