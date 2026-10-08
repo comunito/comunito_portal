@@ -7,7 +7,9 @@ import json
 import os
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from flask import Flask, jsonify, render_template_string
@@ -24,8 +26,10 @@ cache_lock = threading.Lock()
 cache = {name: {"name": name, "online": False, "error": "Inicializando"} for name in NODES}
 history_lock = threading.Lock()
 history_path = Path(os.getenv("STATE_FILE", "/var/lib/comunito-public-dashboard/history.json"))
+local_timezone = ZoneInfo(os.getenv("LOCAL_TIMEZONE", "America/Mexico_City"))
 history = []
 last_seen = {}
+history_day = ""
 
 
 def compact_history(items: list) -> list:
@@ -41,13 +45,41 @@ def compact_history(items: list) -> list:
     return kept
 
 
+def day_for_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, local_timezone).date().isoformat()
+
+
+def current_day() -> str:
+    return datetime.now(local_timezone).date().isoformat()
+
+
+def ensure_current_day() -> None:
+    global history_day, history, last_seen
+    today = current_day()
+    if history_day == today:
+        return
+    history_day = today
+    history = [item for item in history if item.get("day") == today]
+    last_seen = {}
+
+
 def load_history() -> None:
-    global history
+    global history, history_day
+    today = current_day()
+    history_day = today
     try:
         with history_path.open(encoding="utf-8") as fh:
             loaded = json.load(fh)
-        original = loaded[:200] if isinstance(loaded, list) else []
-        history = compact_history(original)
+        original = loaded if isinstance(loaded, list) else []
+        normalized = []
+        for item in original:
+            if not isinstance(item, dict):
+                continue
+            timestamp = float(item.get("ts") or 0)
+            item["day"] = item.get("day") or (day_for_timestamp(timestamp) if timestamp else today)
+            if item["day"] == today:
+                normalized.append(item)
+        history = compact_history(normalized)
         if len(history) != len(original):
             save_history()
     except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -58,7 +90,7 @@ def save_history() -> None:
     history_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = history_path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(compact_history(history[:200]), fh, ensure_ascii=False)
+        json.dump(compact_history(history), fh, ensure_ascii=False)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, history_path)
@@ -67,6 +99,9 @@ def save_history() -> None:
 def remember_readings(nodes: dict) -> None:
     changed = False
     with history_lock:
+        before_day = history_day
+        ensure_current_day()
+        changed = before_day != history_day
         for name, node in nodes.items():
             for cam in node.get("cameras", []):
                 plate = (cam.get("plate") or "").strip()
@@ -84,14 +119,11 @@ def remember_readings(nodes: dict) -> None:
                     if duplicate:
                         continue
                     history.insert(0, {
-                        "ts": ts or time.time(), "source": name, "cam": cam.get("cam"),
+                        "ts": ts or time.time(), "day": history_day,
+                        "source": name, "cam": cam.get("cam"),
                         "plate": plate, "confidence": cam.get("confidence"),
                         "authorized": bool(cam.get("authorized")),
                     })
-                    camera_history = [item for item in history if item.get("source") == name and item.get("cam") == cam]
-                    if len(camera_history) > 50:
-                        oldest = min(camera_history, key=lambda item: item.get("ts", 0))
-                        history.remove(oldest)
                     history.sort(key=lambda item: item.get("ts", 0), reverse=True)
                     changed = True
         if changed:
@@ -160,11 +192,14 @@ def poll_loop() -> None:
 
 @app.get("/api/public-status")
 def public_status():
+    with history_lock:
+        ensure_current_day()
     with cache_lock:
         nodes = list(cache.values())
     with history_lock:
-        recent = list(history[:200])
-    return jsonify({"updated_at": time.time(), "nodes": nodes, "history": recent})
+        today_history = list(history)
+    return jsonify({"updated_at": time.time(), "history_day": history_day,
+                    "nodes": nodes, "history": today_history})
 
 
 @app.get("/healthz")
@@ -188,7 +223,7 @@ main{max-width:1180px;margin:24px auto;padding:0 18px}.grid{display:grid;grid-te
 footer{max-width:1180px;margin:20px auto;padding:0 18px;color:#647180;font-size:12px}
 @media(max-width:700px){header{padding:14px 18px}header h1{font-size:22px}header div{font-size:12px}main{margin:12px auto;padding:0 10px}.grid{grid-template-columns:1fr;gap:10px}.title h2{font-size:18px;margin:4px 0}.plate{font-size:22px}.history-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.history-col{padding:8px}.history-col h3{font-size:12px;line-height:1.2}.history-col li{display:block;font-size:14px}.history-col time{display:block;margin-top:2px}.card{padding:11px}}
 </style></head><body><header><h1>Comunito · Estado de casetas</h1><div>Lecturas automáticas y estado operativo · actualización continua</div></header>
-<main><div id="app" class="grid"><div class="card">Cargando estado…</div></div><section class="card" style="margin-top:12px"><div class="title"><h2>Últimas lecturas</h2><span class="muted">50 por cámara</span></div><div class="search"><input id="plateSearch" type="search" placeholder="Buscar placa en el historial local…" autocomplete="off"><button onclick="applySearch()">Buscar</button><button class="clear" onclick="clearSearch()">Limpiar</button></div><div id="searchInfo" class="muted"></div><div id="history" class="history-grid" style="margin-top:10px"></div></section></main><footer>Vista pública de solo lectura. Los portales de administración permanecen protegidos.</footer>
+<main><div id="app" class="grid"><div class="card">Cargando estado…</div></div><section class="card" style="margin-top:12px"><div class="title"><h2>Lecturas del día</h2><span class="muted">Se reinicia al cambiar la fecha</span></div><div class="search"><input id="plateSearch" type="search" placeholder="Buscar placa en las lecturas del día…" autocomplete="off"><button onclick="applySearch()">Buscar</button><button class="clear" onclick="clearSearch()">Limpiar</button></div><div id="searchInfo" class="muted"></div><div id="history" class="history-grid" style="margin-top:10px"></div></section></main><footer>Vista pública de solo lectura. Los portales de administración permanecen protegidos.</footer>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function time(ts){return ts?new Date(ts*1000).toLocaleString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'Pendiente';}
@@ -202,7 +237,7 @@ ${(n.cameras||[]).map(c=>`<div class="cam"><div class="muted">Cam ${c.cam} · ${
 <div class="small">Última consulta: ${time(n.updated_at)}${n.error?' · '+esc(n.error):''}</div></section>`).join('');
 renderHistory(d.history||[]);
 }
-function renderHistory(all){const query=(document.querySelector('#plateSearch')?.value||'').trim().toUpperCase();const filtered=query?all.filter(e=>String(e.plate||'').toUpperCase().includes(query)):all;document.querySelector('#searchInfo').textContent=query?`${filtered.length} coincidencia(s) en el historial local`:' ';document.querySelector('#history').innerHTML=cols.map(([key,label])=>{const items=filtered.filter(e=>key===e.source+'|'+e.cam).slice(0,50);return `<div class="history-col"><h3>${label}</h3><ul>${items.map(e=>`<li><b>${esc(e.plate)}</b><time>${time(e.ts)}</time></li>`).join('')||'<li class="muted">Sin coincidencias</li>'}</ul></div>`}).join('')}
+function renderHistory(all){const query=(document.querySelector('#plateSearch')?.value||'').trim().toUpperCase();const filtered=query?all.filter(e=>String(e.plate||'').toUpperCase().includes(query)):all;document.querySelector('#searchInfo').textContent=query?`${filtered.length} coincidencia(s) en las lecturas del día`:`${filtered.length} lectura(s) del día`;document.querySelector('#history').innerHTML=cols.map(([key,label])=>{const items=filtered.filter(e=>key===e.source+'|'+e.cam);return `<div class="history-col"><h3>${label}</h3><ul>${items.map(e=>`<li><b>${esc(e.plate)}</b><time>${time(e.ts)}</time></li>`).join('')||'<li class="muted">Sin lecturas</li>'}</ul></div>`}).join('')}
 function applySearch(){if(latestData)renderHistory(latestData.history||[])}
 function clearSearch(){document.querySelector('#plateSearch').value='';applySearch()}
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&document.activeElement?.id==='plateSearch')applySearch()});

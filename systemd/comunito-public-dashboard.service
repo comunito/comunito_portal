@@ -11,6 +11,7 @@ Environment=PORT=5100
 Environment=PRIMARY_URL=http://127.0.0.1:5000
 Environment=SECONDARY_URL=http://100.112.144.53:5000
 Environment=STATE_FILE=/var/lib/comunito-public-dashboard/history.json
+Environment=LOCAL_TIMEZONE=America/Mexico_City
 ExecStart=/home/navarracaseta1/comunito_portal/comunito-venv/bin/python /home/navarracaseta1/comunito_portal/public_dashboard.py
 StateDirectory=comunito-public-dashboard
 Restart=always
