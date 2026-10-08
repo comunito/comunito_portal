@@ -57,7 +57,11 @@ def remember_readings(nodes: dict) -> None:
                 key = f"{name}|cam{cam.get('cam')}"
                 previous = last_seen.get(key, (0.0, ""))
                 if plate and plate != "Sin lectura" and (ts > previous[0] or plate != previous[1]):
-                    history.insert(0, {"ts": ts or time.time(), "source": name, "cam": cam.get("cam"), "plate": plate})
+                    history.insert(0, {
+                        "ts": ts or time.time(), "source": name, "cam": cam.get("cam"),
+                        "plate": plate, "confidence": cam.get("confidence"),
+                        "authorized": bool(cam.get("authorized")),
+                    })
                     history[:] = history[:50]
                     last_seen[key] = (ts, plate)
                     changed = True
@@ -87,13 +91,18 @@ def public_node_status(name: str, base: str) -> dict:
         for cam in (1, 2):
             status = get_json(base, f"/api/status?cam={cam}")
             motion_cam = motion.get(f"cam{cam}") or {}
+            current_plate = (status.get("plate") or "").strip()
+            with history_lock:
+                previous = next((item for item in history if item.get("source") == name and item.get("cam") == cam), None)
+            showing_previous = not bool(current_plate) and bool(previous)
             result["cameras"].append({
                 "cam": cam,
                 "connected": f"CAM{cam}:OK" in result.get("health", ""),
-                "plate": status.get("plate") or "Sin lectura",
-                "confidence": status.get("conf"),
-                "detected_ts": status.get("ts"),
-                "authorized": bool(status.get("auth")),
+                "plate": current_plate or (previous or {}).get("plate") or "Sin lectura",
+                "confidence": status.get("conf") if current_plate else (previous or {}).get("confidence"),
+                "detected_ts": status.get("ts") if current_plate else (previous or {}).get("ts"),
+                "authorized": bool(status.get("auth")) if current_plate else bool((previous or {}).get("authorized")),
+                "showing_previous": showing_previous,
                 "motion": bool(motion_cam.get("active")),
                 "last_sent": motion_cam.get("queue", {}).get("sent", 0),
             })
@@ -155,7 +164,7 @@ function time(ts){return ts?new Date(ts*1000).toLocaleString('es-MX',{hour:'2-di
 function render(d){document.querySelector('#app').innerHTML=d.nodes.map(n=>`<section class="card">
 <div class="title"><h2>${esc(n.name)}</h2><span class="${n.online?'ok':'bad'}"><i class="dot ${n.online?'on':''}"></i>${n.online?'En línea':'Sin conexión'}</span></div>
 <div class="metrics"><div class="metric"><span class="muted">Temperatura</span><b>${n.temperature_c==null?'—':esc(Number(n.temperature_c).toFixed(1))}°C</b></div><div class="metric"><span class="muted">CPU</span><b>${n.cpu_pct==null?'—':esc(Number(n.cpu_pct).toFixed(0))}%</b></div><div class="metric"><span class="muted">Pluma</span><b>${n.gate_connected?'Conectada':'—'}</b></div></div>
-${(n.cameras||[]).map(c=>`<div class="cam"><div class="muted">Cam ${c.cam} · ${c.connected?'Conectada':'Sin conexión'} ${c.motion?'· Movimiento':''}</div><div class="plate">${esc(c.plate)}</div><div class="small">${c.authorized?'Autorizada':'Sin autorización'} · Confianza ${c.confidence==null?'—':esc((Number(c.confidence)*100).toFixed(0))}%</div></div>`).join('')}
+${(n.cameras||[]).map(c=>`<div class="cam"><div class="muted">Cam ${c.cam} · ${c.connected?'Conectada':'Sin conexión'} ${c.motion?'· Movimiento':''}</div><div class="plate">${esc(c.plate)}</div><div class="small">${c.authorized?'Autorizada':'Sin autorización'} · Confianza ${c.confidence==null?'—':esc((Number(c.confidence)*100).toFixed(0))}% · ${c.detected_ts?'Leída '+time(c.detected_ts):'Sin lectura registrada'}</div></div>`).join('')}
 <div class="wl"><b>Whitelist</b><br>${(n.whitelist||[]).map(w=>`Cam ${w.cam}: última actualización ${time(w.last_refresh_ts)}${w.refresh_min?' · cada '+w.refresh_min+' min':''}`).join('<br>')}</div>
 <div class="small">Última consulta: ${time(n.updated_at)}${n.error?' · '+esc(n.error):''}</div></section>`).join('');
 const cols=['Real Navarra acceso 1|1','Real Navarra acceso 1|2','Real Navarra acceso 2|1','Real Navarra acceso 2|2'];
