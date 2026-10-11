@@ -1,0 +1,13 @@
+[Unit]
+Description=Comunito persistent incident diagnostics
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+StateDirectory=comunito-diagnostics
+UMask=0077
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=45
+ExecStart=/usr/local/sbin/comunito-diagnostics

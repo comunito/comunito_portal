@@ -109,10 +109,14 @@ sudo cp "$APP_DIR/systemd/comunito-network-watchdog.timer" /etc/systemd/system/
 sudo install -m 0755 "$APP_DIR/install/storage_guard.sh" /usr/local/sbin/comunito-storage-guard
 sudo cp "$APP_DIR/systemd/comunito-storage-guard.service" /etc/systemd/system/
 sudo cp "$APP_DIR/systemd/comunito-storage-guard.timer" /etc/systemd/system/
+sudo install -m 0755 "$APP_DIR/install/diagnostics.sh" /usr/local/sbin/comunito-diagnostics
+sudo cp "$APP_DIR/systemd/comunito-diagnostics.service" /etc/systemd/system/
+sudo cp "$APP_DIR/systemd/comunito-diagnostics.timer" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable comunito-portal.service --now
 sudo systemctl enable --now comunito-network-watchdog.timer
 sudo systemctl enable --now comunito-storage-guard.timer
+sudo systemctl enable --now comunito-diagnostics.timer
 
 echo "==> 9) Reducir escrituras persistentes y acotar diagnósticos"
 sudo install -d -m 0755 /etc/systemd/journald.conf.d

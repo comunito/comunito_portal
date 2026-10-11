@@ -3,7 +3,6 @@ Description=Comunito Portal
 After=network-online.target tailscaled.service
 Wants=network-online.target tailscaled.service
 StartLimitIntervalSec=0
-TimeoutStartSec=0
 
 [Service]
 User=pi
