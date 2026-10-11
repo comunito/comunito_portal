@@ -18,6 +18,10 @@ from flask import Flask, jsonify, render_template_string
 app = Flask(__name__)
 POLL_SECONDS = max(1, int(os.getenv("POLL_SECONDS", "2")))
 DUPLICATE_WINDOW_SECONDS = 10.0
+# El panel es auxiliar: agrupa escrituras para no sincronizar la SD por cada
+# lectura. Si se corta energía, como máximo se pierde el reflejo público de
+# unos segundos; el portal y sus bitácoras no dependen de este archivo.
+HISTORY_SAVE_MIN_SECONDS = max(5, int(os.getenv("HISTORY_SAVE_MIN_SECONDS", "15")))
 NODES = {
     "Real Navarra acceso 1": os.getenv("PRIMARY_URL", "http://127.0.0.1:5000"),
     "Real Navarra acceso 2": os.getenv("SECONDARY_URL", "http://100.112.144.53:5000"),
@@ -30,6 +34,8 @@ local_timezone = ZoneInfo(os.getenv("LOCAL_TIMEZONE", "America/Mexico_City"))
 history = []
 last_seen = {}
 history_day = ""
+history_dirty = False
+history_last_saved = 0.0
 
 
 def compact_history(items: list) -> list:
@@ -87,6 +93,7 @@ def load_history() -> None:
 
 
 def save_history() -> None:
+    global history_dirty, history_last_saved
     history_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = history_path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
@@ -94,9 +101,12 @@ def save_history() -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, history_path)
+    history_dirty = False
+    history_last_saved = time.monotonic()
 
 
 def remember_readings(nodes: dict) -> None:
+    global history_dirty
     changed = False
     with history_lock:
         before_day = history_day
@@ -127,6 +137,13 @@ def remember_readings(nodes: dict) -> None:
                     history.sort(key=lambda item: item.get("ts", 0), reverse=True)
                     changed = True
         if changed:
+            history_dirty = True
+        # El poller se ejecuta aun sin lecturas nuevas, así que una escritura
+        # pendiente se confirma pronto sin castigar la SD en cada detección.
+        if history_dirty and (
+            before_day != history_day
+            or time.monotonic() - history_last_saved >= HISTORY_SAVE_MIN_SECONDS
+        ):
             save_history()
 
 

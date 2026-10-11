@@ -16,6 +16,11 @@ ExecStart=/home/navarracaseta1/comunito_portal/comunito-venv/bin/python /home/na
 StateDirectory=comunito-public-dashboard
 Restart=always
 RestartSec=5
+# El tablero nunca debe quitar recursos al proceso que abre accesos.
+CPUQuota=20%
+MemoryMax=160M
+MemorySwapMax=0
+TasksMax=64
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=read-only
