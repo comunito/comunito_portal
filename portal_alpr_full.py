@@ -1022,6 +1022,79 @@ wl_index=[{"owners":{}, "visitors":{}}, {"owners":{}, "visitors":{}}]
 tag_index=[{"owners":{}}, {"owners":{}}]
 _last_wl=[{ "owners":0.0, "visitors":0.0 }, { "owners":0.0, "visitors":0.0 }]
 _last_tag_wl=[{ "owners":0.0 }, { "owners":0.0 }]
+_WL_CACHE_FILE = os.getenv("COMUNITO_WL_CACHE", "/var/lib/comunito/whitelist-cache.json")
+_WL_CACHE_MAX_BYTES = 8 * 1024 * 1024
+_wl_cache_lock = threading.Lock()
+
+def _atomic_cache_write(payload: dict) -> None:
+    """Persist the last valid WL without touching the ALPR loop."""
+    directory = os.path.dirname(_WL_CACHE_FILE) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".whitelist-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, _WL_CACHE_FILE)
+        os.chmod(_WL_CACHE_FILE, 0o600)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+def _cache_snapshot() -> dict:
+    return {"version": 1, "updated_at": time.time(), "cameras": {}}
+
+def _load_whitelist_cache() -> None:
+    """Load the last known good WL before the network refresh thread starts."""
+    try:
+        if not os.path.isfile(_WL_CACHE_FILE) or os.path.getsize(_WL_CACHE_FILE) > _WL_CACHE_MAX_BYTES:
+            return
+        with open(_WL_CACHE_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        cameras = payload.get("cameras", {}) if isinstance(payload, dict) else {}
+        loaded = 0
+        for cam in (1, 2):
+            cam_data = cameras.get(f"cam{cam}", {}) or {}
+            for kind in ("owners", "visitors"):
+                rows = cam_data.get(kind, {}).get("rows", [])
+                if isinstance(rows, list) and rows:
+                    _build_idx_from_rows(cam, kind, rows)
+                    loaded += len(wl_index[cam - 1][kind])
+            tag_rows = cam_data.get("tags_owners", {}).get("rows", [])
+            if isinstance(tag_rows, list) and tag_rows:
+                _build_tag_idx_from_rows(cam, tag_rows)
+                loaded += len(tag_index[cam - 1]["owners"])
+        if loaded:
+            print(f"[WL] Cache local cargada: {loaded} registros; se conservará sin Internet", flush=True)
+    except Exception as exc:
+        print(f"[WL] Cache local ignorada: {exc}", flush=True)
+
+def _cache_whitelist(cam: int, kind: str, rows: list[list[str]]) -> None:
+    """Update cache only after a successful, non-empty remote download."""
+    try:
+        with _wl_cache_lock:
+            payload = _cache_snapshot()
+            if os.path.isfile(_WL_CACHE_FILE) and os.path.getsize(_WL_CACHE_FILE) <= _WL_CACHE_MAX_BYTES:
+                try:
+                    with open(_WL_CACHE_FILE, "r", encoding="utf-8") as handle:
+                        old = json.load(handle)
+                    if isinstance(old, dict):
+                        payload = old
+                except Exception:
+                    pass
+            payload.setdefault("version", 1)
+            payload.setdefault("cameras", {})
+            cam_data = payload["cameras"].setdefault(f"cam{cam}", {})
+            cam_data[kind] = {"updated_at": time.time(), "rows": rows}
+            payload["updated_at"] = time.time()
+            _atomic_cache_write(payload)
+    except Exception as exc:
+        # Cache failure must never affect detection or gate operation.
+        print(f"[WL] No se pudo guardar cache local: {exc}", flush=True)
 
 def _guess_has_header(rows)->bool:
     if not rows: return False
@@ -1111,7 +1184,14 @@ def download_wl(cam:int, kind:str)->str:
         rows=_parse_csv_text(r.text)
     except Exception as e:
         return f"❌ Error WL: {e}"
+    previous = dict(wl_index[cam-1][kind])
     msg=_build_idx_from_rows(cam,kind,rows)
+    if not wl_index[cam-1][kind] and previous:
+        wl_index[cam-1][kind].update(previous)
+        return f"❌ WL vacía; se conserva la anterior ({len(previous)} registros)"
+    if not wl_index[cam-1][kind]:
+        return "❌ WL vacía; no se reemplaza la cache local"
+    _cache_whitelist(cam, kind, rows)
     _last_wl[cam-1][kind]=time.time()
     return msg
 
@@ -1125,7 +1205,14 @@ def download_tag_wl(cam:int)->str:
         rows=_parse_csv_text(r.text)
     except Exception as e:
         return f"❌ Error TAG WL: {e}"
+    previous = dict(tag_index[cam-1]["owners"])
     msg=_build_tag_idx_from_rows(cam,rows)
+    if not tag_index[cam-1]["owners"] and previous:
+        tag_index[cam-1]["owners"].update(previous)
+        return f"❌ TAG WL vacía; se conserva la anterior ({len(previous)} registros)"
+    if not tag_index[cam-1]["owners"]:
+        return "❌ TAG WL vacía; no se reemplaza la cache local"
+    _cache_whitelist(cam, "tags_owners", rows)
     _last_tag_wl[cam-1]["owners"]=time.time()
     return msg
 
@@ -3504,6 +3591,9 @@ def healthz():
     return (f"CAM1:{'OK' if ok1 else 'NO'} CAM2:{'OK' if ok2 else 'NO'}", (200 if (ok1 or ok2) else 503))
 
 # ----- Threads -----
+# Carga la última whitelist válida antes de iniciar detección y refresco remoto.
+# Si no existe o está dañada, el portal sigue arrancando normalmente.
+_load_whitelist_cache()
 threading.Thread(target=_alpr_loop, args=(1,), daemon=True).start()
 threading.Thread(target=_alpr_loop, args=(2,), daemon=True).start()
 threading.Thread(target=_motion_loop, args=(1,), daemon=True).start()

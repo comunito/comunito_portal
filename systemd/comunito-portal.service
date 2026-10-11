@@ -30,6 +30,8 @@ MemoryMax=700M
 MemorySwapMax=0
 OOMPolicy=kill
 OOMScoreAdjust=500
+StateDirectory=comunito
+ReadWritePaths=/var/lib/comunito
 
 # Endurecimiento: el portal no necesita modificar el sistema ni elevar privilegios.
 NoNewPrivileges=true
